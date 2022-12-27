@@ -1,0 +1,21 @@
+[train_data]
+dataset = "MNIST"
+train = true
+normalize = [[0.1307], [0.3081]]
+
+[test_data]
+dataset = "MNIST"
+normalize = [[0.1307], [0.3081]]
+
+[model]
+layers = [
+  ["Flatten"],
+  ["Linear", 128],
+  ["ReLU"],
+  ["Linear", 10],
+]
+
+[train]
+optimizer = ["Adam", {lr = 0.001 }]
+epochs = 250
+log_every = 10

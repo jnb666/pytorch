@@ -1,0 +1,28 @@
+[train_data]
+dataset = "MNIST"
+train = true
+batch_size = 256
+normalize = [[0.1307], [0.3081]]
+
+[test_data]
+dataset = "MNIST"
+batch_size = 1000
+normalize = [[0.1307], [0.3081]]
+
+[model]
+layers = [
+  ["Conv2d", {out_channels=32, kernel_size=5} ],
+  ["MaxPool2d", 2 ],
+  ["Conv2d", {out_channels=64, kernel_size=5} ],
+  ["MaxPool2d", 2 ],
+  ["Flatten"],
+  ["Linear", 1024 ],
+  ["ReLU"],
+  ["Dropout", 0.5 ],
+  ["Linear", 10 ],
+]
+
+[train]
+optimizer = ["Adam", {lr = 0.0001 }]
+epochs = 25
+shuffle = true

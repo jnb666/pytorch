@@ -1,0 +1,68 @@
+half=true
+
+[train_data]
+dataset = "CIFAR10"
+train = true
+end = 40000
+batch_size = 128
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[test_data]
+dataset = "CIFAR10"
+batch_size = 1000
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[valid_data]
+dataset = "CIFAR10"
+train = true
+start = 40000
+batch_size = 1000
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[model]
+conv = [
+  ["Conv2d", {out_channels="$nfeat", kernel_size="$size", padding="same", bias=false} ],
+  ["BatchNorm2d"],
+  ["ReLU"], 
+]
+
+layers = [
+  ["conv", {nfeat=192, size=5} ],
+  ["conv", {nfeat=160, size=1} ],
+  ["conv", {nfeat=96, size=1} ],
+  ["MaxPool2d", {kernel_size=3, stride=2, padding=1} ],
+
+  ["conv", {nfeat=192, size=5} ],
+  ["conv", {nfeat=192, size=1} ],
+  ["conv", {nfeat=192, size=1} ],  
+  ["AvgPool2d", {kernel_size=3, stride=2, padding=1} ],
+
+  ["conv", {nfeat=192, size=3} ],
+  ["conv", {nfeat=192, size=1} ],
+  ["conv", {nfeat=192, size=1} ],
+  ["AvgPool2d", {kernel_size=8} ],
+
+  ["Flatten"],
+  ["Linear", 10 ],
+]
+
+[weight_init]
+Linear = ["xavier_uniform"]
+Conv2d = ["xavier_uniform"]
+
+[bias_init]
+Linear = ["constant", 0]
+Conv2d = ["constant", 0]
+
+[transform]
+transforms = [
+  ["RandomHorizontalFlip", {p=0.5} ],
+  ["RandomAffine", {p=0.5, degrees=0, translate=[0.15,0.15], padding_mode="reflection"} ],
+]
+
+[train]
+optimizer = ["Adam", {lr=0.001} ]
+scheduler = ["ExponentialLR", {gamma=0.975} ]
+stop = ["valid_accuracy", {epochs=6, extra=4}]
+epochs = 60
+shuffle = true

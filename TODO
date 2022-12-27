@@ -1,0 +1,12 @@
+TODO
+====
+- save window size and position
+
+- gui: plot histogram of activation values
+
+- use pytorch v2
+
+- CPU and memory profiling
+
+- hyperparameter tuning?
+

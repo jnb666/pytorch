@@ -1,0 +1,45 @@
+half = true
+
+[train_data]
+dataset = "CIFAR10"
+train = true
+batch_size = 256
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[test_data]
+dataset = "CIFAR10"
+batch_size = 1000
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[model]
+layers = [
+  ["Conv2d", {out_channels=32, kernel_size=3, padding="same"} ],
+  ["ReLU"],
+  ["Conv2d", {out_channels=32, kernel_size=3} ],
+  ["ReLU"],
+  ["MaxPool2d", 2 ],
+  ["Dropout", 0.25 ],
+  ["Conv2d", {out_channels=64, kernel_size=3, padding="same"} ],
+  ["ReLU"],
+  ["Conv2d", {out_channels=64, kernel_size=3} ],
+  ["ReLU"],
+  ["MaxPool2d", 2 ],
+  ["Dropout", 0.25 ],
+  ["Flatten"],
+  ["Linear", 512 ],
+  ["ReLU"],
+  ["Dropout", 0.5 ],
+  ["Linear", 10 ],
+]
+
+[transform]
+transforms = [
+  ["RandomHorizontalFlip", {p=0.5} ],
+  ["RandomAffine", {p=0.5, degrees=0, translate=[0.15,0.15], padding_mode="reflection"} ],
+]
+
+[train]
+optimizer = ["Adam", {lr = 0.0005 }]
+epochs = 60
+shuffle = true
+

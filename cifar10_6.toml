@@ -1,0 +1,61 @@
+half = true
+
+[train_data]
+dataset = "CIFAR10"
+train = true
+end = 40000
+batch_size = 128
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[test_data]
+dataset = "CIFAR10"
+batch_size = 1000
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[valid_data]
+dataset = "CIFAR10"
+train = true
+start = 40000
+batch_size = 1000
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[model]
+block = [
+  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same"} ],
+  ["BatchNorm2d"],
+  ["ReLU"],
+  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same"} ],
+  ["BatchNorm2d"],
+  ["ReLU"],
+  ["MaxPool2d", 2 ],
+  ["Dropout", "$dropout" ], 
+]
+
+layers = [
+  ["block", {nfeat=32, dropout=0.2} ],
+  ["block", {nfeat=64, dropout=0.3} ],
+  ["block", {nfeat=128, dropout=0.4} ],
+  ["Flatten"],
+  ["Linear", 10 ],
+]
+
+[weight_init]
+Linear = ["xavier_uniform"]
+Conv2d = ["xavier_uniform"]
+
+[bias_init]
+Linear = ["constant", 0]
+Conv2d = ["constant", 0]
+
+[transform]
+transforms = [
+  ["RandomHorizontalFlip", {p=0.5} ],
+  ["RandomAffine", {p=0.5, degrees=0, translate=[0.15,0.15], padding_mode="reflection"} ],
+]
+
+[train]
+optimizer = ["Adam", {lr=0.001} ]
+scheduler = ["StepLR", {step_size=20, gamma=0.2} ]
+stop = ["valid_accuracy", {epochs=6, extra=3} ]
+epochs = 100
+shuffle = true

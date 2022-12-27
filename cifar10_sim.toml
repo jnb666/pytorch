@@ -1,0 +1,87 @@
+half=true
+
+[train_data]
+dataset = "CIFAR10"
+train = true
+end = 40000
+batch_size = 128
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[test_data]
+dataset = "CIFAR10"
+batch_size = 1000
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[valid_data]
+dataset = "CIFAR10"
+train = true
+start = 40000
+batch_size = 1000
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[model]
+block1 = [
+  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same", bias=false} ],
+  ["BatchNorm2d", {momentum=0.05} ],
+  ["ReLU"], 
+  ["Dropout", 0.2],
+]
+
+block2 = [
+  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same", bias=false} ],
+  ["BatchNorm2d", {momentum=0.05} ],
+  ["ReLU"], 
+  ["MaxPool2d", 2 ],
+  ["Dropout", 0.2],
+]
+
+
+layers = [
+  ["block1", {nfeat=64} ],
+  ["block1", {nfeat=128} ],
+  ["block1", {nfeat=128} ],
+  ["block2", {nfeat=128} ],
+  ["block1", {nfeat=128} ],
+  ["block1", {nfeat=128} ],
+  ["block2", {nfeat=256} ],
+  ["block1", {nfeat=256} ],
+  ["block2", {nfeat=256} ],
+  ["block1", {nfeat=512} ],
+  
+  ["Conv2d", {out_channels=2048, kernel_size=1, padding="same"} ],
+  ["ReLU"],
+  ["Dropout", 0.2],
+
+  ["Conv2d", {out_channels=256, kernel_size=1, padding="same"} ],
+  ["ReLU"],
+  ["MaxPool2d", 2 ],
+  ["Dropout", 0.2],
+
+  ["Conv2d", {out_channels=256, kernel_size=3, padding="same"} ],
+  ["ReLU"],
+  ["MaxPool2d", 2 ],
+
+  ["Flatten"],
+  ["Linear", 10 ],
+]
+
+[weight_init]
+Linear = ["xavier_uniform"]
+Conv2d = ["xavier_uniform"]
+
+[bias_init]
+Linear = ["constant", 0]
+Conv2d = ["constant", 0]
+
+[transform]
+transforms = [
+  ["RandomHorizontalFlip", {p=0.5} ],
+  ["RandomAffine", {p=0.5, degrees=0, translate=[0.15,0.15], padding_mode="reflection"} ],
+]
+
+[train]
+optimizer = ["Adam", {lr=0.001, weight_decay=5e-6} ]
+scheduler = ["StepLR", {step_size=20, gamma=0.2} ]
+stop = ["valid_accuracy", {epochs=6, extra=4}]
+epochs = 100
+shuffle = true
