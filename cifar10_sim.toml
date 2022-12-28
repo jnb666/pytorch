@@ -80,8 +80,8 @@ transforms = [
 ]
 
 [train]
-optimizer = ["Adam", {lr=0.001, weight_decay=5e-6} ]
-scheduler = ["StepLR", {step_size=20, gamma=0.2} ]
-stop = ["valid_accuracy", {epochs=6, extra=4}]
+optimizer = ['Adam', {lr=0.001, weight_decay=5e-06} ]
+scheduler = ['StepLR', {gamma=0.2, step_size=25} ]
+stop = ["valid_accuracy", {epochs=8, extra=3}]
 epochs = 100
 shuffle = true

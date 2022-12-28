@@ -230,7 +230,7 @@ class Trainer:
             return False
 
         stop_val = vals[-1]
-        if stop_val >= min(vals[-1-self.stop_epochs:-1]) - 1e-4:
+        if stop_val >= min(vals[-1-self.stop_epochs:-1]):
             return False
 
         self.stopping = self.stop_extra - 1

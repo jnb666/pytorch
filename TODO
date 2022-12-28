@@ -1,7 +1,5 @@
 TODO
 ====
-- gui: plot histogram of activation values
-
 - use pytorch v2
 
 - CPU and memory profiling

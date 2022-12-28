@@ -51,7 +51,7 @@ def get_device(cpu: bool, seed: int) -> str:
 
 
 def load_checkpoint(dir: str, epoch: int | None, device: str = "cpu") -> dict[str, Any]:
-    """load checkpoint dict from given irectory"""
+    """load checkpoint dict from given directory"""
     if epoch is None:
         file = path.join(dir, "model.pt")
     else:

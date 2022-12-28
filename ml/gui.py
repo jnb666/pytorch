@@ -28,6 +28,7 @@ fgcolor = "w"
 spacing = 15
 margins = 2
 layer_list_width = 150
+hist_bins = 100
 
 
 def init_gui() -> qw.QApplication:
@@ -77,8 +78,9 @@ class MainWindow(qw.QWidget):
         self._pages = [
             StatsPlots(epochs),
             Heatmap(test_data),
-            Activations(self.topmenu, model, test_data, transform, cfg.dir),
             ImageViewer(self.topmenu, test_data, transform),
+            Activations(self.topmenu, model, test_data, transform),
+            Histograms(model, test_data),
             ConfigLabel(str(cfg)),
         ]
         menu = self._build()
@@ -94,7 +96,7 @@ class MainWindow(qw.QWidget):
         self._content = qw.QStackedWidget()
         menu = qw.QListWidget()
         self._page_ids = {}
-        for i, name in enumerate(["stats", "heatmap", "activations", "images", "config"]):
+        for i, name in enumerate(["stats", "heatmap", "images", "activations", "histograms", "config"]):
             self._page_ids[name] = i
             self._content.addWidget(self._pages[i])
             menu.addItem(list_item(name, center=True, min_height=50))
@@ -272,8 +274,7 @@ class Heatmap(pg.GraphicsLayoutWidget):
         for y in range(self._classes):
             for x in range(self._classes):
                 val = map[x, y]
-                col = "w" if val < 0.5 * \
-                    len(self._targets)/self._classes else "k"
+                col = "w" if val < 0.5*len(self._targets)/self._classes else "k"
                 self._add_label(x, y, val, col)
         self._plot.setTitle(f"Epoch {stats.current_epoch}")
 
@@ -481,6 +482,110 @@ class ImageViewer(pg.GraphicsLayoutWidget):
         return f"<pre><font size=2>{s:<16}</font></pre>"
 
 
+class LayerList(qw.QListWidget):
+    """LayerList is a multiselect list widget with the list of network layers
+
+    Args:
+        model:nn.Sequential    neural net model
+
+    Attributes:
+        states:list[bool]      flag indicating if each layer is shown
+    """
+
+    def __init__(self, model: nn.Sequential):
+        super().__init__()
+        self.setSelectionMode(qw.QAbstractItemView.MultiSelection)  # type: ignore
+        self.setFixedWidth(layer_list_width)
+        self.states: list[bool] = []
+        self._add_layer(0, "input")
+        for i, layer in enumerate(model):
+            self._add_layer(i+1, str(layer))
+
+    def _add_layer(self, index, name):
+        try:
+            name = name[:name.index("(")]
+        except ValueError:
+            pass
+        if name.startswith("Lazy"):
+            name = name[4:]
+        self.states.append(False)
+        self.addItem(list_item(f"{index}: {name}", min_height=30))
+
+
+class Histograms(qw.QWidget):
+    """The Histograms widgets displays histograms of the activation intensity for the selected layers.
+
+    Args:
+        model:nn.Module             neural net model
+        data:Dataset                test data - will load first batch of data
+
+    Attributes:
+        model:nn.Sequential         neural net model
+        data:Dataset                test data - will load first batch of data
+        layers:LayerList            list of layers to select from
+        activations:list[Tensor]    activations for each layer
+        plots:GraphicsLayoutWidget  content widget holding the plots
+    """
+
+    def __init__(self, model: nn.Sequential, data: Dataset):
+        super().__init__()
+        self.model = model
+        self.data = data
+        self.plots = pg.GraphicsLayoutWidget()
+        self.layers = LayerList(model)
+        self._init_select(self.layers)
+        cols = qw.QHBoxLayout()
+        cols.setContentsMargins(0, 0, 0, 0)
+        cols.addWidget(self.plots)
+        cols.addWidget(self.layers)
+        self.setLayout(cols)
+
+    def _init_select(self, layers):
+        for i in range(layers.count()):
+            name = layers.item(i).text()
+            if i == 0 or "Conv" in name or "Linear" in name:
+                layers.states[i] = True
+                layers.item(i).setSelected(True)
+        layers.itemClicked.connect(self._select_layer)
+
+    def _select_layer(self, item):
+        index = self.layers.indexFromItem(item).row()
+        self.layers.states[index] = not self.layers.states[index]
+        log.debug(f"Histograms: toggle {item.text()} index={index} {self.layers.states[index]}")
+        self._update_plots()
+
+    def update_stats(self, stats: Stats | None, checkpoint: dict[str, Any]) -> None:
+        """Called to update stats data after each epoch"""
+        if checkpoint and stats:
+            log.debug(f"Histograms: update_stats - epoch={stats.current_epoch}")
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            self.activations = get_activations(self.model, self.data)
+            self._update_plots()
+
+    def _update_plots(self):
+        self.plots.clear()
+        nplots = 0
+        for enabled in self.layers.states:
+            if enabled:
+                nplots += 1
+        if nplots == 0:
+            return
+        rows, cols = calc_grid(nplots)
+        n = 0
+        for i, enabled in enumerate(self.layers.states):
+            if enabled:
+                data = self.activations[i].flatten()
+                y, x = torch.histogram(data, hist_bins)
+                hx = x[:hist_bins].numpy()
+                hy = y.numpy()
+                width = float(hx[1] - hx[0])
+                log.debug(f"layer {i} hist: nbins={hist_bins} range={x[0]:.3},{x[-1]:.3} width={width:.3}")
+                p = self.plots.addPlot(row=n//cols, col=n % cols)
+                p.setTitle(self.layers.item(i).text())
+                p.addItem(pg.BarGraphItem(x0=hx, width=width, height=hy, brush="g"))
+                n += 1
+
+
 class Activations(qw.QWidget):
     """The Activations widgets displays image plots with the activation intensity for the selected layers.
 
@@ -490,15 +595,12 @@ class Activations(qw.QWidget):
         data:Dataset                test data - will load first batch of data
         transform:nn.Module         set of transforms to apply when enriching images
         test_transform:nn.Module    set of transforms to apply by default
-        dir:str                     run directory with saved weights etc.
         cmap:str                    color map name
 
     Attributes:
         model:nn.Sequential         neural net model
         data:Dataset                test data - will load first batch of data
-        layer_name:list[str]        short name of each layer type
-        layer_state:list[bool]      flag indicating if each layer is shown
-        layer_index:dict[str,int]   map from layer name to index
+        layers:LayerList            list of layers to select from
         index:int                   current image index
         activations:list[Tensor]    activations for each layer
         plots:PlotGrids             content widget holding the plots
@@ -510,71 +612,50 @@ class Activations(qw.QWidget):
                  model: nn.Sequential,
                  data: Dataset,
                  transform: nn.Module | None,
-                 dir: str,
                  cmap: str | None = "CET-L6"):
         super().__init__()
         self.data = data
-        self.transform = transform
+        self._transform = transform
         self.transformed = False
         self.model = model
         self.menu = menu
-        self.dir = dir
         self.cmap = cmap
         log.debug(f"init Activations: dir={dir} cmap={cmap}")
         self.index: int = 0
         self.activations: list[Tensor] = []
         self.predict: Tensor | None = None
         self.plots = PlotGrids(len(model)+1, cmap, data.classes)
-        self.layer_state: list[bool] = []
-        self.layer_name: list[str] = []
-        self.layer_index: dict[str, int] = {}
+        self.layers = LayerList(model)
+        self._init_select(self.layers)
         cols = qw.QHBoxLayout()
         cols.setContentsMargins(0, 0, 0, 0)
         cols.addWidget(self.plots)
-        rows = qw.QVBoxLayout()
-        rows.addWidget(self._layer_list())
-        cols.addLayout(rows)
+        cols.addWidget(self.layers)
         self.setLayout(cols)
 
     @property
     def samples(self) -> int:
         return min(self.data.nitems, self.data.batch_size)
 
-    def _layer_list(self):
-        list = qw.QListWidget()
-        list.setSelectionMode(qw.QAbstractItemView.MultiSelection)
-        self._add_layer(list, 0, "input")
-        enabled = 0
-        for i, layer in enumerate(self.model):
-            self._add_layer(list, i+1, str(layer))
-        for i, name in enumerate(self.layer_name):
-            if i == 0 or i == len(self.layer_name)-1 or (enabled <= 2 and ("Conv" in name or "Linear" in name)):
-                self.layer_state[i] = True
-                list.item(i).setSelected(True)
-                enabled += 1
-        list.itemClicked.connect(self._select_layer)
-        list.setFixedWidth(layer_list_width)
-        return list
+    @property
+    def transform(self) -> nn.Module | None:
+        return self._transform if self.transformed else None
 
-    def _add_layer(self, list, index, name):
-        try:
-            name = name[:name.index("(")]
-        except ValueError:
-            pass
-        if name.startswith("Lazy"):
-            name = name[4:]
-        self.layer_name.append(name)
-        label = f"{index}: {name}"
-        self.layer_state.append(False)
-        self.layer_index[label] = index
-        list.addItem(list_item(label, min_height=30))
+    def _init_select(self, layers):
+        enabled = 0
+        for i in range(layers.count()):
+            name = layers.item(i).text()
+            if i == 0 or i == layers.count()-1 or (enabled <= 2 and ("Conv" in name or "Linear" in name)):
+                layers.states[i] = True
+                layers.item(i).setSelected(True)
+                enabled += 1
+        layers.itemClicked.connect(self._select_layer)
 
     def _select_layer(self, item):
-        name = item.text()
-        index = self.layer_index[name]
-        self.layer_state[index] = not self.layer_state[index]
-        log.debug(f"toggle {name} index={index} {self.layer_state[index]}")
-        self.plots.update_plots(self.index, self.activations, self.layer_state)
+        index = self.layers.indexFromItem(item).row()
+        self.layers.states[index] = not self.layers.states[index]
+        log.debug(f"toggle {item.text()} index={index} {self.layers.states[index]}")
+        self.plots.update_plots(self.index, self.activations, self.layers.states)
 
     def prev(self) -> None:
         """callback from ImageMenu """
@@ -594,18 +675,16 @@ class Activations(qw.QWidget):
         """callback from ImageMenu """
         if self.predict is not None:
             self.index = 0
-            log.debug(
-                f"Activations: filter images errors_only={errors_only} class={target_class}")
-            self.data.filter(
-                self.predict, target_class=target_class, errors_only=errors_only)
-            self._recalc()
+            log.debug(f"Activations: filter images errors_only={errors_only} class={target_class}")
+            self.data.filter(self.predict, target_class=target_class, errors_only=errors_only)
+            self.activations = get_activations(self.model, self.data, self.transform)
             self._update_plots()
 
     def set_transformed(self, on: bool) -> None:
         """callback from ImageMenu """
         log.debug(f"set transformed => {on}")
         self.transformed = on
-        self._recalc()
+        self.activations = get_activations(self.model, self.data, self.transform)
         self._update_plots()
 
     def update_stats(self, stats: Stats | None, checkpoint: dict[str, Any]) -> None:
@@ -614,30 +693,16 @@ class Activations(qw.QWidget):
             log.debug(f"Activations: update_stats - epoch={stats.current_epoch}")
             self.predict = torch.clone(stats.predict)
             self.model.load_state_dict(checkpoint["model_state_dict"])
-            self._recalc()
+            self.activations = get_activations(self.model, self.data, self.transform)
             self._update_plots()
-
-    @torch.no_grad()
-    def _recalc(self) -> None:
-        self.model.eval()
-        x = self.data[0][0]
-        if self.transformed and self.transform is not None:
-            x = self.transform(x)
-        log.debug(f"update activations: input={list(x.size())}")
-        self.activations = [x]
-        for i, layer in enumerate(self.model):
-            x = layer(x)
-            self.activations.append(x)
-        self.outputs = x
 
     def _update_plots(self) -> None:
         if self.index >= self.samples:
             self.index = 0
         self.menu.label.setText(f"Image {self.index+1} of {self.samples}")
         tgt = int(self.data.get(self.index, self.data.targets))
-        self.menu.info.setText(
-            f"{self.data.indexOf(self.index)}: target={self.data.classes[tgt]}")
-        self.plots.update_plots(self.index, self.activations, self.layer_state)
+        self.menu.info.setText(f"{self.data.indexOf(self.index)}: target={self.data.classes[tgt]}")
+        self.plots.update_plots(self.index, self.activations, self.layers.states)
 
 
 class PlotGrids(qw.QWidget):
@@ -680,8 +745,7 @@ class PlotGrids(qw.QWidget):
             empty = True
             for i, enabled in enumerate(layer_state):
                 if enabled:
-                    self._layout.addWidget(
-                        self._grid(i, activations[i][index]))
+                    self._layout.addWidget(self._grid(i, activations[i][index]))
                     empty = False
             if empty:
                 self._layout.addWidget(PlotGrid(None))
@@ -695,8 +759,7 @@ class PlotGrids(qw.QWidget):
         except KeyError:
             labels = self.classes if i == len(self.layer_state)-1 else None
             is_rgb = (i == 0 and data.size()[0] == 3)
-            grid = PlotGrid(data, cmap=self.cmap,
-                            xlabels=labels, rgbimage=is_rgb)
+            grid = PlotGrid(data, cmap=self.cmap, xlabels=labels, rgbimage=is_rgb)
             self.layers[i] = grid
         return grid
 
@@ -766,7 +829,7 @@ class PlotGrid(pg.GraphicsLayoutWidget):
         if rgbimage:
             self._rows, self._cols = 1, 1
         else:
-            self._rows, self._cols = calc_grid(self.nplots)
+            self._rows, self._cols = calc_grid(self.nplots, prefer_square=True)
         self._draw()
 
     @property
@@ -821,7 +884,7 @@ class PlotGrid(pg.GraphicsLayoutWidget):
         updated = False
         rows, cols = self._rows, self._cols
         while rows > 1:
-            r, c = calc_grid(self.nplots, rows-1)
+            r, c = calc_grid(self.nplots, rows-1, prefer_square=True)
             if c/self.cols <= max_factor:
                 rows, cols = r, c
                 updated = True
@@ -834,8 +897,7 @@ class PlotGrid(pg.GraphicsLayoutWidget):
     def _draw(self) -> None:
         if self.rgbimage:
             if self.nplots != 3 and self.nplots != 4:
-                raise ValueError(
-                    "expecting 3 or 4 color channels for RGB image")
+                raise ValueError("expecting 3 or 4 color channels for RGB image")
             data = self.data.transpose((1, 2, 0))
             plot, img = self._plot(data)
             self.addItem(plot, row=0, col=0)
@@ -1005,8 +1067,7 @@ class PlotLayout(qw.QLayout):
             # expand grid rows while we have space
             w = self.widget(ix)
             if w.expand_width(self.width / self._size[ix][0]):
-                log.debug(
-                    f"PlotLayout: reshape grid {ix} => {(w.rows,w.cols)}")
+                log.debug(f"PlotLayout: reshape grid {ix} => {(w.rows,w.cols)}")
             else:
                 break
         grid_changed: set[int] = set()
@@ -1047,8 +1108,7 @@ class PlotLayout(qw.QLayout):
         if total_height > avail_height:
             scale = avail_height / total_height
             for i in flex:
-                self._size[i] = (int(self._size[i][0]*scale),
-                                 int(self._size[i][1]*scale))
+                self._size[i] = (int(self._size[i][0]*scale), int(self._size[i][1]*scale))
 
         # get narrowest multirow grid to reshape
         grid_to_resize = -1
@@ -1077,6 +1137,21 @@ class ConfigLabel(qw.QScrollArea):
 
     def update_stats(self, stats: Stats | None, checkpoint: dict[str, Any]) -> None:
         pass
+
+
+def get_activations(model: nn.Sequential, data: Dataset, transform: nn.Module | None = None) -> list[Tensor]:
+    """Evaluate model and return activations for each layer"""
+    model.eval()
+    with torch.no_grad():
+        x = data[0][0]
+        if transform is not None:
+            x = transform(x)
+        log.debug(f"get activations: input={list(x.size())}")
+        activations = [x]
+        for i, layer in enumerate(model):
+            x = layer(x)
+            activations.append(x)
+    return activations
 
 
 def set_background(w):
@@ -1125,17 +1200,18 @@ def _calc_grid(items, rows=None) -> tuple[int, int]:
     return rows, cols
 
 
-def calc_grid(items: int, rows: int | None = None) -> tuple[int, int]:
+def calc_grid(items: int, rows: int | None = None, prefer_square: bool = False) -> tuple[int, int]:
     if items <= 1:
         return 1, 1
     rows, cols = _calc_grid(items, rows)
-    r, c = rows, cols
-    i = 0
-    while r > 2 and i < 2:
-        r, c = _calc_grid(items, rows-i-1)
-        if r*c == items:
-            return r, c
-        i += 1
+    if prefer_square:
+        r, c = rows, cols
+        i = 0
+        while r > 2 and i < 2:
+            r, c = _calc_grid(items, rows-i-1)
+            if r*c == items:
+                return r, c
+            i += 1
     return rows, cols
 
 
@@ -1145,7 +1221,6 @@ def to_image(data: Tensor) -> np.ndarray:
     img = np.flip(data.numpy(), axis=2)
     if c == 1:
         return img[0][0]
-    elif c == 3 or c == 4:
+    if c == 3 or c == 4:
         return img[0].transpose((1, 2, 0))
-    raise ValueError(f"Invalid data shape for image: {data.shape}")
     raise ValueError(f"Invalid data shape for image: {data.shape}")
