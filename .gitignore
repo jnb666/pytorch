@@ -1,4 +1,5 @@
 data/
 runs/
+venv/
 .mypy_cache/
 __pycache__/

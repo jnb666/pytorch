@@ -1,7 +1,5 @@
 TODO
 ====
-- save window size and position
-
 - gui: plot histogram of activation values
 
 - use pytorch v2

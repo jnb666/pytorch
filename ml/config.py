@@ -120,9 +120,10 @@ class Config():
         cfg = self.cfg["model"]
         for args in cfg["layers"]:
             defn = cfg.get(args[0])
+            argv = args.copy()
             if defn is not None:
-                vars = args.pop() if len(args) > 1 else {}
-                log.debug(f"get_definition: {args[0]} {vars}")
+                vars = argv.pop() if len(argv) > 1 else {}
+                log.debug(f"get_definition: {defn} {argv[0]} {vars}")
                 for layer in get_definition(torch.nn, defn, vars):
                     model.append(layer.to(device))
             else:
@@ -208,7 +209,7 @@ def get_definition(pkg, defn, vars):
 
 
 def get_module(pkg, args, vars=None):
-    args = list(args)
+    args = list(args).copy()
     kwargs = {}
     if len(args) > 1 and isinstance(args[-1], dict):
         kwargs = args.pop().copy()

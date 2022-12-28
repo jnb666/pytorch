@@ -1,6 +1,8 @@
+import json
 import logging as log
 import math
 from functools import reduce
+from os import path
 from typing import Any
 
 import numpy as np
@@ -16,16 +18,19 @@ from .dataset import Dataset
 from .trainer import Stats
 from .utils import load_checkpoint
 
+window_width = 1200
+window_height = 900
+window_ypos = 50
+
 font_size = 11
 bgcolor = "#111"
 fgcolor = "w"
 spacing = 15
 margins = 2
-ypos = 50
 layer_list_width = 150
 
 
-def init_gui(width: int, height: int, title: str) -> tuple[qw.QApplication, qw.QMainWindow]:
+def init_gui() -> qw.QApplication:
     """Set default fonts, colors etc."""
     app = qw.QApplication([])
     fnt = app.font()
@@ -35,12 +40,7 @@ def init_gui(width: int, height: int, title: str) -> tuple[qw.QApplication, qw.Q
     pg.setConfigOption("foreground", fgcolor)
     pg.setConfigOption("antialias", True)
     pg.setConfigOption("imageAxisOrder", "row-major")
-
-    win = qw.QMainWindow()
-    win.setWindowTitle(title)
-    sz = app.primaryScreen().size()
-    win.setGeometry((sz.width()-width)//2, ypos, width, height)
-    return app, win
+    return app
 
 
 class MainWindow(qw.QWidget):
@@ -65,6 +65,9 @@ class MainWindow(qw.QWidget):
                  test_data: Dataset,
                  transform: nn.Module | None):
         super().__init__()
+        self.setWindowTitle(f"{cfg.name} v{cfg.version}")
+        self._config_file = path.expanduser("~/.pytorch_gui")
+        self._set_size()
         self.checkpoint: dict[str, Any] = {}
         self.stats: Stats | None = None
         self.topmenu = ImageMenu(test_data.classes)
@@ -124,6 +127,32 @@ class MainWindow(qw.QWidget):
         index = self._content.currentIndex()
         log.debug(f"update content index={index}")
         self._pages[index].update_stats(self.stats, self.checkpoint)
+
+    def _set_size(self):
+        self.opts = {}
+        try:
+            # get saved window config
+            with open(self._config_file, encoding="utf-8") as f:
+                self.opts = json.load(f)
+            log.debug(f"loaded window geometry: {self.opts}")
+            self.setGeometry(self.opts["xpos"], self.opts["ypos"], self.opts["width"], self.opts["height"])
+        except FileNotFoundError:
+            # or open with default size
+            self.resize(window_width, window_height)
+
+    def resizeEvent(self, ev):
+        log.debug(f"window resize: {ev.size()}")
+        self.opts["width"] = ev.size().width()
+        self.opts["height"] = ev.size().height()
+        with open(self._config_file, "w", encoding="utf-8") as f:
+            json.dump(self.opts, f)
+
+    def moveEvent(self, ev):
+        log.debug(f"window move: {ev.pos()}")
+        self.opts["xpos"] = ev.pos().x()
+        self.opts["ypos"] = ev.pos().y()
+        with open(self._config_file, "w", encoding="utf-8") as f:
+            json.dump(self.opts, f)
 
 
 class StatsPlots(qw.QWidget):

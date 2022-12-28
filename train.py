@@ -13,9 +13,6 @@ import torch
 from PySide6.QtCore import QTimer
 from torch import nn
 
-width = 1200
-height = 900
-
 
 def getargs():
     parser = argparse.ArgumentParser()
@@ -33,20 +30,19 @@ def getargs():
 
 
 def run_gui(q, cfg, args, timeout=0.05):
-    app, win = ml.init_gui(width, height, f"{cfg.name} v{cfg.version}")
+    app = ml.init_gui()
     test_data = cfg.dataset(args.datadir, "test")
-    gui = ml.MainWindow(cfg, cfg.model(), test_data, cfg.transforms())
-    win.setCentralWidget(gui)
+    win = ml.MainWindow(cfg, cfg.model(), test_data, cfg.transforms())
 
     def update():
         try:
             epoch = q.get(block=False)
-            gui.update_stats(epoch)
+            win.update_stats(epoch)
         except queue.Empty:
             pass
 
     log.info("start GUI")
-    timer = QTimer(gui)
+    timer = QTimer(win)
     timer.timeout.connect(update)
     timer.start(timeout)
 

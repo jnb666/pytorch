@@ -9,9 +9,6 @@ import numpy as np
 import torch
 from torch import nn
 
-width = 1200
-height = 900
-
 
 def getargs():
     parser = argparse.ArgumentParser()
@@ -35,10 +32,9 @@ def main():
     transform = cfg.transforms()
     model = cfg.model()
 
-    app, win = ml.init_gui(width, height, f"{cfg.name} v{cfg.version}")
-    gui = ml.MainWindow(cfg, model, test_data, transform)
-    win.setCentralWidget(gui)
-    gui.update_stats()
+    app = ml.init_gui()
+    win = ml.MainWindow(cfg, model, test_data, transform)
+    win.update_stats()
     win.show()
     sys.exit(app.exec())
 
