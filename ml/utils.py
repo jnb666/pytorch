@@ -9,8 +9,8 @@ from typing import Any
 import numpy as np
 import torch
 
-torch.set_printoptions(precision=2, threshold=1000, edgeitems=4, linewidth=180)
-np.set_printoptions(precision=2, suppress=True, threshold=1000, edgeitems=4, linewidth=160)
+torch.set_printoptions(precision=3, threshold=1000, edgeitems=4, linewidth=180)
+np.set_printoptions(precision=3, suppress=True, threshold=1000, edgeitems=4, linewidth=160)
 pp = pprint.PrettyPrinter(indent=2)
 
 
@@ -38,6 +38,7 @@ def pformat(data) -> str:
 
 def get_device(cpu: bool, seed: int) -> str:
     """Get cuda or cpu device and initialise random number seed"""
+    log.info(f"== pytorch {torch.__version__} ==")
     if not cpu and torch.cuda.is_available():
         device = "cuda"
         torch.backends.cudnn.deterministic = True

@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging as log
 import os
@@ -28,9 +29,10 @@ class Stats():
         self.test_accuracy = []
         self.valid_loss = []
         self.valid_accuracy = []
+        self.valid_loss_avg = []
         self.predict = []
-        self.start = time.time()
-        self.elapsed = 0.0
+        self.start = [time.time()]
+        self.elapsed = [0.0]
 
     def __str__(self):
         s = "Epoch {:3d}:  Train loss: {:.3f}  ".format(self.current_epoch, self.train_loss[-1])
@@ -39,10 +41,19 @@ class Stats():
         s += "Test loss: {:.3f}  accuracy: {:.1%}".format(self.test_loss[-1], self.test_accuracy[-1])
         return s
 
+    def elapsed_total(self) -> datetime.timedelta:
+        """Total elapsed time"""
+        total = sum(self.elapsed)
+        if total < 10:
+            return datetime.timedelta(seconds=total)
+        else:
+            return datetime.timedelta(seconds=round(total))
+
     def update(self, predict: Tensor, train_loss: float, test_loss: float, test_accuracy: float,
-               valid_loss: float | None = None, valid_accuracy: float | None = None):
+               valid_loss: float | None = None, valid_accuracy: float | None = None,
+               valid_loss_avg: float | None = None):
         """Add new record to stats history"""
-        self.elapsed = time.time() - self.start
+        self.elapsed[-1] = time.time() - self.start[-1]
         self.predict = predict
         self.epoch.append(self.current_epoch)
         self.train_loss.append(train_loss)
@@ -51,12 +62,16 @@ class Stats():
         if valid_loss is not None:
             self.valid_loss.append(valid_loss)
             self.valid_accuracy.append(valid_accuracy)
+        if valid_loss_avg is not None:
+            self.valid_loss_avg.append(valid_loss_avg)
 
     def state_dict(self):
         return self.__dict__
 
     def load_state_dict(self, state):
         self.__dict__.update(state)
+        self.start.append(time.time())
+        self.elapsed.append(0.0)
 
     def table_columns(self) -> list[str]:
         if len(self.valid_loss):
@@ -73,6 +88,49 @@ class Stats():
                 data.append((self.train_loss[i], self.valid_loss[i], 100 * self.valid_accuracy[i],
                              self.test_loss[i], 100*self.test_accuracy[i]))
         return data
+
+
+class Stopper:
+    """Stopper checks whether the stopping condition is met"""
+
+    def __init__(self, epochs: int = 3, extra: int = 0, ema: float = 20, eps: float = 1e-4):
+        log.info(f"init stopper: epochs={epochs} extra={extra} ema={ema}")
+        self.epochs = epochs
+        self.extra = extra
+        self.k = 2 / (ema + 1)
+        self.avg: list[float] = []
+        self.eps = eps
+        self.stopping = -1
+
+    @property
+    def average(self) -> float:
+        return self.avg[-1] if len(self.avg) > 0 else 0.0
+
+    def step(self, stats: Stats) -> bool:
+        """Returns True if should stop"""
+        if self.stopping >= 0:
+            log.debug(f"stopper: stop in {self.stopping} epochs")
+            self.stopping -= 1
+            return self.stopping < 0
+        if len(stats.valid_loss) == 0:
+            return False
+        x = stats.valid_loss[-1]
+        if len(self.avg) == 0:
+            self.avg.append(x)
+        else:
+            self.avg.append(x*self.k + self.avg[-1]*(1-self.k))
+        if len(self.avg) < self.epochs + 1:
+            return False
+        val = self.avg[-1]
+        stop = (val - max(self.avg[-self.epochs-1:-1])) / val > -self.eps
+        prev = np.array(self.avg[-self.epochs-1:-1])
+        if stop:
+            log.info(f"valid_avg={val:.4} {prev} - stop in {self.extra} epochs")
+            self.stopping = self.extra - 1
+            return self.stopping <= 0
+        else:
+            log.debug(f"valid_avg={val:.4} {prev}")
+        return False
 
 
 class Trainer:
@@ -92,6 +150,7 @@ class Trainer:
         log_every:int        frequency to log stats to stdout
         predict:Tensor       predictions from last test run
         dir:str              directory to save stats and weights
+        stopper:Stopper      optional object to check if should stop after this epoch
     """
 
     def __init__(self, cfg: Config, model: nn.Module, loss_fn=None):
@@ -109,19 +168,13 @@ class Trainer:
         self.log_every = int(cfg.train.get("log_every", 1))
         self.predict: Tensor | None = None
         self.scaler = torch.cuda.amp.GradScaler(enabled=cfg.half)
-        self._init_stop()
-        log.info(f"== Trainer: ==\n{self}")
-
-    def _init_stop(self):
+        self.stopper: Stopper | None = None
         try:
-            stop_cfg = self.cfg.train["stop"]
-            stop_args = stop_cfg[1]
-            self.stop_var = stop_cfg[0]
-            self.stop_epochs = stop_args.get("epochs", 1)
-            self.stop_extra = stop_args.get("extra", 0)
+            cfg = self.cfg.train["stop"]
+            self.stopper = Stopper(**cfg)  # type: ignore
         except KeyError:
-            self.stop_var = None
-        self.stopping = -1
+            pass
+        log.info(f"== Trainer: ==\n{self}")
 
     def __str__(self) -> str:
         return pformat(self.cfg.train)
@@ -176,7 +229,7 @@ class Trainer:
             train_data.shuffle()
         train_loss = 0
         for i, (data, targets) in enumerate(train_data):
-            if transform is not None and self.stopping < 0:
+            if transform is not None and (self.stopper is None or self.stopper.stopping < 0):
                 if i == 0:
                     log.debug("apply transform")
                 with torch.no_grad():
@@ -218,25 +271,9 @@ class Trainer:
         """Returns True if hit stopping condition"""
         if stats.current_epoch >= self.epochs:
             return True
-        if self.stop_var is None:
-            return False
-        if self.stopping >= 0:
-            self.stopping -= 1
-            log.info(f"should_stop: stopping={self.stopping+1}")
-            return self.stopping < 0
-
-        vals = getattr(stats, self.stop_var)
-        if len(vals) < self.stop_epochs + 1:
-            return False
-
-        stop_val = vals[-1]
-        if stop_val >= min(vals[-1-self.stop_epochs:-1]):
-            return False
-
-        self.stopping = self.stop_extra - 1
-        log.info(f"should_stop: {self.stop_var} = {stop_val:.4f}")
-        self.stop_prev = stop_val
-        return self.stopping < 0
+        if self.stopper is not None:
+            return self.stopper.step(stats)
+        return False
 
 
 def link(file, link):

@@ -1,8 +1,18 @@
 TODO
 ====
-- use pytorch v2
+- service + RPC interface using ZMQ:
+   commands to server - all return status: [client REQ and server REP] 
+        [ "load", "config.toml" ]       stop training, load model and data and init weights and optimizer
+        [ "restart" ]                   stop training, reset random seed and init weights and optimizer
+        [ "resume", n ]                 stop training, load rng state, model weights and optimizer state from checkpoint
+        [ "max_epoch", n ]              set max epoch limit
+        [ "pause", flag ]               pause (flag=true) or resume (flag=false) run
+        [ "shutdown" ]                  stops training and shut down server
+    responses from server:
+        [ "status", code, cmd, err ]    code = "ok" or "error", cmd = source command,  err = error message detail or ""xw
+    [server PUB and client SUB]
+        [ "epoch",  n ]                 sent to indicate epoch n has been saved
 
 - CPU and memory profiling
 
 - hyperparameter tuning?
-

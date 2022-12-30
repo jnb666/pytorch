@@ -1,6 +1,7 @@
 import json
 import logging as log
 import math
+import multiprocessing as mp
 from functools import reduce
 from os import path
 from typing import Any
@@ -16,7 +17,7 @@ from torch import Tensor, nn
 from .config import Config
 from .dataset import Dataset
 from .trainer import Stats
-from .utils import load_checkpoint
+from .utils import load_checkpoint, pformat
 
 window_width = 1200
 window_height = 900
@@ -52,6 +53,7 @@ class MainWindow(qw.QWidget):
         model:nn.Module      torch network model
         test_data:Dataset    test images and labels
         transform:nn.Module  augmentationtransform applied to training data (optional)
+        cmd:Queue   command queue in train mode
 
     Properties:
         dir:str              current run directory
@@ -64,7 +66,8 @@ class MainWindow(qw.QWidget):
                  cfg: Config,
                  model: nn.Sequential,
                  test_data: Dataset,
-                 transform: nn.Module | None):
+                 transform: nn.Module | None,
+                 cmd=None):
         super().__init__()
         self.setWindowTitle(f"{cfg.name} v{cfg.version}")
         self._config_file = path.expanduser("~/.pytorch_gui")
@@ -76,7 +79,7 @@ class MainWindow(qw.QWidget):
         self.dir = cfg.dir
         epochs = int(cfg.train.get("epochs", 10))
         self._pages = [
-            StatsPlots(epochs),
+            StatsPlots(self, epochs, cmd),
             Heatmap(test_data),
             ImageViewer(self.topmenu, test_data, transform),
             Activations(self.topmenu, model, test_data, transform),
@@ -118,7 +121,10 @@ class MainWindow(qw.QWidget):
         self._pages[index].update_stats(self.stats, self.checkpoint)
 
     def update_stats(self, epoch: int | None = None) -> None:
-        """Refresh GUI with updated stats and model weights"""
+        """Refresh GUI with updated stats and model weights - signals end of run if epoch < 0"""
+        if epoch is not None and epoch < 0:
+            self._pages[0].stop_run()  # type: ignore
+            return
         try:
             self.checkpoint = load_checkpoint(self.dir, epoch)
         except FileNotFoundError:
@@ -161,17 +167,69 @@ class StatsPlots(qw.QWidget):
     """StatsPlots widget shows the loss and accuracy plots
 
     Args:
-    epochs:int  max number of epochs
+        main        reference to main window
+        epochs:int  max number of epochs
+        cmd:Queue   command queue in train mode
     """
 
-    def __init__(self, epochs: int):
+    def __init__(self, main: MainWindow, epochs: int, cmd=None):
         super().__init__()
         log.debug(f"init StatsPlots: epochs={epochs}")
+        self._main = main
+        self._queue = cmd
         self._table = pg.TableWidget(editable=False, sortable=False)
-        layout = qw.QHBoxLayout()
-        layout.addWidget(self._table, 1)
-        layout.addWidget(self._make_plots(epochs), 2)
+        cols = qw.QHBoxLayout()
+        cols.addWidget(self._table, 1)
+        cols.addWidget(self._make_plots(epochs), 2)
+        layout = qw.QVBoxLayout()
+        layout.addLayout(self._menu())
+        layout.addLayout(cols)
         self.setLayout(layout)
+
+    def _menu(self):
+        self.setStyleSheet(
+            "QPushButton {background-color: '#27709f'; border-width: 2px; border-radius: 5px; min-width: 6em; padding: 5px;} " +
+            "QPushButton:checked {background-color: '#008000';}"
+        )
+        self.start_stop = qw.QPushButton("start")
+        self.start_stop.setCheckable(True)
+        self.start_stop.clicked.connect(self._button_clicked)
+        self.quit = qw.QPushButton("quit")
+        self.quit.clicked.connect(self._quit)
+        self.initial_lr_label = qw.QLabel("0.0")
+        self.lr_label = qw.QLabel("0.0")
+        self.elapsed_label = qw.QLabel("0")
+        menu = qw.QHBoxLayout()
+        menu.addWidget(qw.QLabel("initial lr:"))
+        menu.addWidget(self.initial_lr_label)
+        menu.addSpacing(spacing)
+        menu.addWidget(qw.QLabel("latest lr:"))
+        menu.addWidget(self.lr_label)
+        menu.addSpacing(spacing)
+        menu.addWidget(qw.QLabel("elapsed:"))
+        menu.addWidget(self.elapsed_label)
+        if self._queue:
+            menu.addSpacing(spacing)
+            menu.addWidget(self.start_stop)
+            menu.addSpacing(spacing)
+            menu.addWidget(self.quit)
+        menu.addStretch()
+        return menu
+
+    def stop_run(self):
+        self.start_stop.setChecked(False)
+        self.start_stop.setEnabled(False)
+
+    def _button_clicked(self):
+        state = self.start_stop.isChecked()
+        cmd = "start" if state else "stop"
+        label = "stop" if state else "start"
+        self.start_stop.setText(label)
+        self._queue.put(cmd)
+
+    def _quit(self):
+        self._queue.put("quit")
+        self._main.close()
 
     def _make_plots(self, epochs):
         w = pg.GraphicsLayoutWidget()
@@ -195,6 +253,8 @@ class StatsPlots(qw.QWidget):
         add_line(self._plot1, stats.epoch, stats.test_loss, color="g", name="testing")
         if len(stats.valid_loss):
             add_line(self._plot1, stats.epoch, stats.valid_loss, color="y", name="validation")
+        if len(stats.valid_loss_avg):
+            add_line(self._plot1, stats.epoch, stats.valid_loss_avg, color="y", dash=True)
 
         miny = min(stats.test_accuracy)
         miny = math.floor(miny*10) / 10
@@ -224,6 +284,15 @@ class StatsPlots(qw.QWidget):
             log.debug(f"update stats: epoch={stats.current_epoch} of xrange={stats.xrange}")
             self._update_table(stats)
             self._update_plots(stats)
+            self.elapsed_label.setText(str(stats.elapsed_total()))
+        if checkpoint:
+            try:
+                groups = checkpoint["optimizer_state_dict"]["param_groups"]
+                params = groups[0]
+                self.lr_label.setText(f"{params['lr']:.6}")
+                self.initial_lr_label.setText(f"{params['initial_lr']:.6}")
+            except KeyError:
+                pass
 
 
 class Heatmap(pg.GraphicsLayoutWidget):
@@ -576,13 +645,14 @@ class Histograms(qw.QWidget):
             if enabled:
                 data = self.activations[i].flatten()
                 y, x = torch.histogram(data, hist_bins)
-                hx = x[:hist_bins].numpy()
-                hy = y.numpy()
+                hx, hy = x.numpy(), y.numpy()
                 width = float(hx[1] - hx[0])
                 log.debug(f"layer {i} hist: nbins={hist_bins} range={x[0]:.3},{x[-1]:.3} width={width:.3}")
                 p = self.plots.addPlot(row=n//cols, col=n % cols)
+                p.setXRange(hx[0], hx[-1], padding=0)
+                p.setYRange(0, np.max(hy), padding=0)
                 p.setTitle(self.layers.item(i).text())
-                p.addItem(pg.BarGraphItem(x0=hx, width=width, height=hy, brush="g"))
+                p.addItem(pg.BarGraphItem(x0=hx[:hist_bins], width=width, height=hy, brush="g"))
                 n += 1
 
 
@@ -852,6 +922,10 @@ class PlotGrid(pg.GraphicsLayoutWidget):
     def width(self) -> int:
         return self._cols*self.data.shape[2]
 
+    @property
+    def img_shape(self) -> tuple[int, int]:
+        return self.data.shape[2], self.data.shape[1]
+
     def set_data(self, tdata: Tensor) -> None:
         """Update data for this set of plots"""
         data = tdata.to("cpu").numpy()
@@ -878,6 +952,10 @@ class PlotGrid(pg.GraphicsLayoutWidget):
         self.clear()
         for i, (plot, img) in enumerate(self.plots):
             self.addItem(plot, row=i//self.cols, col=i % self.cols)
+
+    def set_shape(self, rows: int, cols: int) -> None:
+        """Set number of grid rows and columns"""
+        self._rows, self._cols = rows, cols
 
     def expand_width(self, max_factor: float) -> bool:
         """Adjust grid rows and cols expanding width by up to max_factor ratio"""
@@ -991,7 +1069,6 @@ class PlotLayout(qw.QLayout):
         if not isinstance(table, OutputTable):
             return
         w, h = table.size_hint()
-        # log.debug(f"table resize => {w},{h}")
         table.setGeometry(QRect(self.width-w-10, 10, w, h))
 
     def setGeometry(self, r):
@@ -1044,13 +1121,12 @@ class PlotLayout(qw.QLayout):
             w, h = self._size[i]
             s = min(scale, self.width/w)
             self._size[i] = int(w*s), int(h*s)
-        # log.debug(f"PlotLayout: expand {expandable} => {self._size} scale={scale:.2f}")
+        log.debug(f"PlotLayout: expand {expandable} => {self._size} scale={scale:.2f}")
 
     def _recalc_grid(self) -> set[int]:
         # adjust grid layout to make best use of available space - returns ids of updated grids
         nitems = self.nwidgets
-        log.debug(
-            f"PlotLayout: width={self.width} height={self.height} nitems={nitems}")
+        log.debug(f"PlotLayout: width={self.width} height={self.height} nitems={nitems}")
         if nitems <= 0:
             self._size = []
             return set()
@@ -1059,14 +1135,14 @@ class PlotLayout(qw.QLayout):
             return set()
 
         prev_grid = [(w.rows, w.cols) for w in self.widgets()]
-        # log.debug(f"PlotLayout: orig grid={prev_grid}")
+        log.debug(f"PlotLayout: orig grid={prev_grid}")
         while True:
             ix = self._rescale()
             if ix < 0:
                 break
-            # expand grid rows while we have space
+            # expand grid rows while we have space, preserving aspect ratio
             w = self.widget(ix)
-            if w.expand_width(self.width / self._size[ix][0]):
+            if self._size[ix][1] > self.min_size and w.expand_width(self.width / self._size[ix][0]):
                 log.debug(f"PlotLayout: reshape grid {ix} => {(w.rows,w.cols)}")
             else:
                 break
@@ -1076,6 +1152,20 @@ class PlotLayout(qw.QLayout):
                 grid_changed.add(i)
         return grid_changed
 
+    def _set_min_height(self, ix: int, w: PlotGrid) -> int:
+        # expand widget if height < self.min_size
+        if w.nplots > 1 and not w.rgbimage:
+            iw, ih = w.img_shape
+            rows, cols = calc_grid(w.nplots, prefer_square=True)
+            while rows > 1:
+                r, c = calc_grid(w.nplots, rows-1)
+                if self.min_size*(c*iw)/(r*ih) > self.width:
+                    break
+                rows, cols = r, c
+            w.set_shape(rows, cols)
+        log.debug(f"PlotLayout: set min height for grid {ix} => {(w.rows,w.cols)}")
+        return self.min_size
+
     def _rescale(self) -> int:
         # calc max scale factor to fit in available width and apply min_size
         self._size = []
@@ -1084,10 +1174,10 @@ class PlotLayout(qw.QLayout):
             s = self.width / w.width
             if scale == 0 or (w.height > 1 and s < scale):
                 scale = s
-        for w in self.widgets():
+        for ix, w in enumerate(self.widgets()):
             height = int(w.height*scale)
-            if w.nplots == 1:
-                height = max(height, self.min_size)
+            if height < self.min_size:
+                height = self._set_min_height(ix, w)
             if w.xlabels:
                 height += 20
             width = min(int(height*w.width/w.height), self.width)
@@ -1109,6 +1199,7 @@ class PlotLayout(qw.QLayout):
             scale = avail_height / total_height
             for i in flex:
                 self._size[i] = (int(self._size[i][0]*scale), int(self._size[i][1]*scale))
+        log.debug(f"PlotLayout: size={self._size}")
 
         # get narrowest multirow grid to reshape
         grid_to_resize = -1
@@ -1188,8 +1279,11 @@ def init_plot(p, xlabel=None, ylabel=None, xrange=None, yrange=None, legend=None
         p.addLegend(offset=legend, labelTextSize=str(font_size)+"pt")
 
 
-def add_line(p, xs, ys, color="w", name=None):
-    pen = pg.mkPen(color=color, width=2)
+def add_line(p, xs, ys, color="w", dash=False, name=None):
+    if dash:
+        pen = pg.mkPen(color=color, width=2, style=Qt.DashLine)
+    else:
+        pen = pg.mkPen(color=color, width=2)
     return p.plot(xs, ys, pen=pen, name=name)
 
 

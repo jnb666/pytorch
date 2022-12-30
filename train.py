@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import argparse
-import datetime
 import logging as log
 import multiprocessing as mp
 import queue
@@ -29,10 +28,34 @@ def getargs():
     return parser.parse_args()
 
 
-def run_gui(q, cfg, args, timeout=0.05):
+def should_quit(cmd, paused):
+    while True:
+        if paused:
+            msg = cmd.get()
+            if msg == "quit":
+                log.info("quit training run")
+                return True
+            if msg == "start":
+                log.info("resume training run")
+                return False
+        else:
+            try:
+                msg = cmd.get(block=False)
+                if msg == "quit":
+                    log.info("quit training run")
+                    return True
+                if msg == "stop":
+                    log.info("paused training run")
+                    paused = True
+            except queue.Empty:
+                if not paused:
+                    return False
+
+
+def run_gui(cmd, q, cfg, args, timeout=100):
     app = ml.init_gui()
     test_data = cfg.dataset(args.datadir, "test")
-    win = ml.MainWindow(cfg, cfg.model(), test_data, cfg.transforms())
+    win = ml.MainWindow(cfg, cfg.model(), test_data, cfg.transforms(), cmd)
 
     def update():
         try:
@@ -51,7 +74,7 @@ def run_gui(q, cfg, args, timeout=0.05):
     log.info("exit GUI")
 
 
-def run(args, cfg, q):
+def run(args, cfg, cmd, q):
     device = ml.get_device(args.cpu, args.seed)
     log.debug(cfg)
     cfg.save(clear=args.clear)
@@ -62,41 +85,55 @@ def run(args, cfg, q):
     valid_data = cfg.dataset(args.datadir, "valid", device=device, dtype=dtype)
 
     model = cfg.model(device=device, input=train_data[0][0])
+    if torch.__version__.startswith("2"):
+        log.info("compiling model for torch v2")
+        model = torch.compile(model)
 
     transform = cfg.transforms()
     trainer = ml.Trainer(cfg, model)
 
     if args.resume > 0:
         stats = trainer.resume_from(args.resume, device)
+        log.info(f"  Elapsed time = {stats.elapsed_total()}")
     else:
         stats = ml.Stats()
         stats.xrange = [1, trainer.epochs+1]
 
+    if args.gui and should_quit(cmd, True):
+        return
+
     while not trainer.should_stop(stats):
-        start_epoch = time.time()
+        if args.gui and should_quit(cmd, False):
+            return
+
         stats.current_epoch += 1
         train_loss = trainer.train(train_data, transform)
         if valid_data is not None:
             valid_loss, valid_accuracy = trainer.test(valid_data)
+        else:
+            valid_loss, valid_accuracy = None, None
+        if trainer.stopper:
+            valid_loss_avg = trainer.stopper.average if stats.current_epoch > 1 else valid_loss
+        else:
+            valid_loss_avg = None
         test_loss, test_accuracy = trainer.test(test_data)
-        epoch_time = time.time()-start_epoch
 
         if stats.current_epoch % trainer.log_every == 0:
-            if valid_data is None:
-                stats.update(trainer.predict, train_loss, test_loss, test_accuracy)
-            else:
-                stats.update(trainer.predict, train_loss, test_loss, test_accuracy, valid_loss, valid_accuracy)
+            stats.update(trainer.predict, train_loss, test_loss, test_accuracy,
+                         valid_loss, valid_accuracy, valid_loss_avg)
             trainer.save(stats)
             info = str(stats)
-            if trainer.scheduler:
-                lr, = trainer.scheduler.get_last_lr()
-                info += f"  Learn rate: {lr:.4}"
-            log.info(f"{info}  {epoch_time:.1f}s")
+            if trainer.stopper:
+                info += f"  Avg: {valid_loss_avg:6.3}"
+            log.info(info)
             if args.gui:
                 q.put(stats.current_epoch)
+        if stats.current_epoch % (10*trainer.log_every) == 0:
+            log.info(f"  Elapsed time = {stats.elapsed_total()}")
 
-    elapsed = datetime.timedelta(seconds=round(stats.elapsed))
-    log.info(f"Elapsed time = {elapsed}")
+    log.info(f"  Elapsed time = {stats.elapsed_total()}")
+    if args.gui:
+        q.put(-1)
 
 
 def main():
@@ -105,13 +142,14 @@ def main():
     cfg = ml.Config(args.config, args.rundir, epochs=args.epochs)
     ml.init_logger(debug=args.debug, logdir=cfg.dir)
 
+    cmd = Queue()
     q = Queue()
     if args.gui:
-        p = Process(target=run_gui, args=(q, cfg, args))
+        p = Process(target=run_gui, args=(cmd, q, cfg, args))
         p.start()
 
     try:
-        run(args, cfg, q)
+        run(args, cfg, cmd, q)
     except KeyboardInterrupt:
         if args.gui:
             p.kill()

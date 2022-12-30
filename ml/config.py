@@ -15,6 +15,7 @@ import torchvision.transforms.functional as F  # type: ignore
 from torch import Tensor, nn
 
 from .dataset import Dataset
+from .scheduler import StepLRandWeightDecay
 from .utils import pformat
 
 
@@ -147,12 +148,15 @@ class Config():
         optimizer = getattr(torch.optim, typ)
         return optimizer(model.parameters(), **kwargs)
 
-    def scheduler(self, opt: torch.optim.Optimizer) -> torch.optim.lr_scheduler._LRScheduler | None:
+    def scheduler(self, opt: torch.optim.Optimizer):
         try:
             typ, kwargs = self.train["scheduler"]
         except KeyError:
             return None
-        scheduler = getattr(torch.optim.lr_scheduler, typ)
+        if typ == "StepLRandWeightDecay":
+            scheduler = StepLRandWeightDecay
+        else:
+            scheduler = getattr(torch.optim.lr_scheduler, typ)
         return scheduler(opt, **kwargs)
 
     def __str__(self):
