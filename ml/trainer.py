@@ -32,7 +32,7 @@ class Stats():
         self.test_accuracy = []
         self.valid_loss = []
         self.valid_accuracy = []
-        self.valid_loss_avg = []
+        self.valid_accuracy_avg = []
         self.learning_rate = []
         self.predict = torch.tensor([], dtype=torch.int64)
         self.start = [time.time()]
@@ -44,9 +44,9 @@ class Stats():
         s += "Test loss: {:.3f} accuracy: {:.1%}".format(self.test_loss[-1], self.test_accuracy[-1])
         if len(self.valid_loss):
             s += "  Valid loss: {:.3f}".format(self.valid_loss[-1])
-            if len(self.valid_loss_avg):
-                s += " avg: {:.4f}".format(self.valid_loss_avg[-1])
             s += " accuracy: {:.1%}".format(self.valid_accuracy[-1])
+            if len(self.valid_accuracy_avg):
+                s += " avg: {:.2%}".format(self.valid_accuracy_avg[-1])
         return s
 
     def elapsed_total(self) -> str:
@@ -80,7 +80,7 @@ class Stats():
 
     def table_columns(self) -> list[str]:
         if len(self.valid_loss):
-            return ["train loss", "valid loss", "accuracy ", "test loss", "accuracy"]
+            return ["train loss", "test loss", "accuracy", "valid loss", "accuracy "]
         else:
             return ["train loss", "test loss", "accuracy"]
 
@@ -90,8 +90,8 @@ class Stats():
             if len(self.valid_loss) == 0:
                 data.append((self.train_loss[i], self.test_loss[i], 100*self.test_accuracy[i]))
             else:
-                data.append((self.train_loss[i], self.valid_loss[i], 100 * self.valid_accuracy[i],
-                             self.test_loss[i], 100*self.test_accuracy[i]))
+                data.append((self.train_loss[i], self.test_loss[i], 100*self.test_accuracy[i],
+                             self.valid_loss[i], 100 * self.valid_accuracy[i]))
         return data
 
 
@@ -115,8 +115,8 @@ class Stopper:
         if len(stats.valid_loss) == 0:
             return False
 
-        stats.valid_loss_avg.append(mean(stats.valid_loss, len(stats.valid_loss)-1, self.avg))
-        if len(stats.valid_loss_avg) < self.epochs + 1:
+        stats.valid_accuracy_avg.append(mean(stats.valid_accuracy, len(stats.valid_accuracy)-1, self.avg))
+        if len(stats.valid_accuracy_avg) < self.epochs + 1:
             return False
 
         if self.stopping >= 0:
@@ -124,20 +124,23 @@ class Stopper:
             self.stopping -= 1
             return self.stopping <= 0
 
-        val = stats.valid_loss_avg[-1]
-        prev = np.array(stats.valid_loss_avg[-self.epochs-1:-1])
-        if max(stats.valid_loss_avg[-self.epochs-1:-1]) < val:
-            log.info(f"  valid_avg={val:.4} {prev} - stop in {self.extra} epochs")
+        val = stats.valid_accuracy_avg[-1]
+        prev = np.array(stats.valid_accuracy_avg[-self.epochs-1:-1])
+        if val < np.min(prev):
+            log.info(f"  valid_avg={val:.3%} {prev*100} - stop in {self.extra} epochs")
             self.stopping = self.extra - 1
             return self.stopping <= 0
         else:
-            log.debug(f"valid_avg={val:.4} {prev}")
+            log.debug(f"valid_avg={val:.3%} {prev*100}")
         return False
 
     def update_stats(self, stats: Stats):
         """In case where run is restarted - recalc average loss as config may have changed"""
-        for i in range(len(stats.valid_loss_avg)):
-            stats.valid_loss_avg[i] = mean(stats.valid_loss, i, self.avg)
+        stats.valid_accuracy_avg.clear()
+        for i in range(len(stats.valid_accuracy)):
+            stats.valid_accuracy_avg.append(mean(stats.valid_accuracy, i, self.avg))
+        log.debug(f"valid accuracy:{np.array(stats.valid_accuracy)}")
+        log.debug(f"valid average: {np.array(stats.valid_accuracy_avg)}")
 
 
 class Datasets:

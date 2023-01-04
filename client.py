@@ -67,7 +67,8 @@ def main():
     win = ml.MainWindow(loader, client.send, model=state.name)
 
     subscribe(win, db)
-    client.send("load", state.name)
+    if not state.running:
+        client.send("load", state.name)
 
     win.show()
     sys.exit(app.exec())

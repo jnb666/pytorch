@@ -112,7 +112,6 @@ class MainWindow(qw.QWidget):
         self.data: Dataset | None = None
         self.stats = Stats()
         self.predict = None
-        self.epochs = 100
         self._loader = loader
         self._sender = sender
         self._activations: dict[int, Any] = {}
@@ -135,6 +134,15 @@ class MainWindow(qw.QWidget):
         self.setLayout(cols)
         self.opts = Options().load()
         self._set_size()
+
+    @property
+    def epochs(self):
+        if len(self.stats.xrange) == 2:
+            return self.stats.xrange[1]
+        elif self.cfg:
+            return self.cfg.epochs
+        else:
+            return 100
 
     def _set_size(self) -> None:
         if self.opts.xpos >= 0 and self.opts.ypos >= 0:
@@ -179,11 +187,8 @@ class MainWindow(qw.QWidget):
             return
         self.setWindowTitle(f"{self.cfg.name} v{self.cfg.version}")
         self.img_menu.set_classes(self.data.classes)
-        self.epochs = int(self.cfg.train.get("epochs", self.epochs))
-        self.pages[2].page = 0
-        self.pages[3].update_model()
-        self.pages[4].update_model()
-        self.pages[5].set_text(self.cfg.text)
+        for page in self.pages:
+            page.update_config(self.cfg)
         self.data.reset()
         self.cmd_menu.update_config(self.cfg, self.stats, self._loader.get_models())
 
@@ -283,7 +288,7 @@ class CommandMenu(qw.QWidget):
             self.stop.setEnabled(False)
             self.stop.clicked.connect(self._stop)  # type: ignore
             self.resume_from = qw.QComboBox()
-            self.resume_from.setMinimumWidth(50)
+            self.resume_from.setMinimumWidth(60)
             self.resume = qw.QPushButton("resume")
             self.resume.setEnabled(False)
             self.resume.clicked.connect(self._resume)  # type: ignore
@@ -398,6 +403,10 @@ class ConfigLabel(qw.QScrollArea):
         """Update the label text"""
         self.content.setText(f"<pre>{text}</pre>")
 
+    def update_config(self, cfg: Config) -> None:
+        """Called when new config file is loaded"""
+        self.set_text(cfg.text)
+
     def update_stats(self) -> None:
         pass
 
@@ -412,53 +421,62 @@ class StatsPlots(qw.QWidget):
     def __init__(self, main: MainWindow):
         super().__init__()
         self.main = main
+        self.model_name = ""
         self.table = pg.TableWidget(editable=False, sortable=False)
-        plots = self._draw_plots(main.epochs)
+        self.plots = pg.GraphicsLayoutWidget()
+        self._draw_plots()
         cols = qw.QHBoxLayout()
         cols.setContentsMargins(0, 0, 0, 0)
         cols.addWidget(self.table, 2)
-        cols.addWidget(plots, 3)
+        cols.addWidget(self.plots, 3)
         self.setLayout(cols)
 
-    def _draw_plots(self, epochs: int) -> pg.GraphicsWidget:
-        w = pg.GraphicsLayoutWidget()
-        self.plot1 = w.addPlot(row=0, col=0)
+    def _draw_plots(self) -> None:
+        self.plots.clear()
+        self.plot1 = self.plots.addPlot(row=0, col=0)
         self.plot1.showGrid(x=True, y=True, alpha=0.75)
-        self.plot2 = w.addPlot(row=1, col=0)
+        self.plot2 = self.plots.addPlot(row=1, col=0)
         self.plot2.showGrid(x=True, y=True, alpha=0.75)
-        init_plot(self.plot1, ylabel="cross entropy loss",
-                  xrange=[1, epochs], yrange=[0, 1], legend=(0, 1))
+        init_plot(self.plot1, ylabel="cross entropy loss", legend=(0, 1),
+                  xrange=[1, self.main.epochs], yrange=[0, 1], mouse=True)
         init_plot(self.plot2, xlabel="epoch", ylabel="accuracy",
-                  xrange=[1, epochs], yrange=[0, 1])
-        return w
+                  xrange=[1, self.main.epochs], yrange=[0, 1], mouse=True)
+        self.plot2.getViewBox().setXLink(self.plot1.getViewBox())
+        self.line1: list[pg.PlotDataItem] = []
+        self.line2: list[pg.PlotDataItem] = []
 
     def _update_plots(self, stats: Stats) -> None:
         """draw line plots"""
-        if len(stats.epoch) == 0 or stats.current_epoch == 0:
-            init_plot(self.plot1, ylabel="cross entropy loss",
-                      xrange=stats.xrange, yrange=[0, 1])
-            init_plot(self.plot2, xlabel="epoch", ylabel="accuracy",
-                      xrange=stats.xrange, yrange=[0, 1])
-            return
-
-        maxy = max(max(stats.train_loss), max(stats.test_loss))
-        maxy = math.ceil(maxy*5) / 5 + 0.0001
-        init_plot(self.plot1, ylabel="cross entropy loss",
-                  xrange=stats.xrange, yrange=[0, maxy], legend=(0, 1))
-        add_line(self.plot1, stats.epoch, stats.train_loss, color="r", name="training")
-        add_line(self.plot1, stats.epoch, stats.test_loss, color="g", name="testing")
-        if len(stats.valid_loss):
-            add_line(self.plot1, stats.epoch, stats.valid_loss, color="y", name="validation")
-        if len(stats.valid_loss_avg):
-            add_line(self.plot1, stats.epoch, stats.valid_loss_avg, color="y", dash=True)
-
-        miny = min(stats.test_accuracy)
-        miny = math.floor(miny*10) / 10
-        init_plot(self.plot2, xlabel="epoch", ylabel="accuracy",
-                  xrange=stats.xrange, yrange=[miny, 1.0001])
-        add_line(self.plot2, stats.epoch, stats.test_accuracy, color="g", name="testing")
-        if len(stats.valid_accuracy):
-            add_line(self.plot2, stats.epoch, stats.valid_accuracy, color="y", name="validation")
+        y1 = [stats.train_loss, stats.test_loss]
+        if stats.valid_loss:
+            y1.append(stats.valid_loss)
+        y2 = [stats.test_accuracy]
+        if stats.valid_accuracy:
+            y2.append(stats.valid_accuracy)
+        if stats.valid_accuracy_avg:
+            y2.append(stats.valid_accuracy_avg)
+        update_range(self.plot1, self.main.epochs, y1)
+        update_range(self.plot2, self.main.epochs, y2)
+        if len(self.line1) == len(y1) and len(self.line2) == len(y2):
+            log.debug("updating plot lines")
+            update_lines(self.line1, stats.epoch, y1)
+            update_lines(self.line2, stats.epoch, y2)
+        else:
+            log.debug("adding lines to plots")
+            maxy = max(stats.train_loss[0], stats.test_loss[0])
+            self.plot1.setYRange(0, maxy, padding=0)
+            self.plot2.setYRange(stats.test_accuracy[0], 1, padding=0)
+            self.line1.clear()
+            self.line1.append(add_line(self.plot1, stats.epoch, stats.train_loss, color="r", name="training"))
+            self.line1.append(add_line(self.plot1, stats.epoch, stats.test_loss, color="g", name="testing"))
+            if len(stats.valid_loss):
+                self.line1.append(add_line(self.plot1, stats.epoch, stats.valid_loss, color="y", name="validation"))
+            self.line2.clear()
+            self.line2.append(add_line(self.plot2, stats.epoch, stats.test_accuracy, color="g", name="testing"))
+            if len(stats.valid_accuracy):
+                self.line2.append(add_line(self.plot2, stats.epoch, stats.valid_accuracy, color="y", name="validation"))
+            if len(stats.valid_accuracy_avg):
+                self.line2.append(add_line(self.plot2, stats.epoch, stats.valid_accuracy_avg, color="y", dash=True))
 
     def _update_table(self, stats: Stats) -> None:
         """update stats table"""
@@ -474,12 +492,21 @@ class StatsPlots(qw.QWidget):
         self.table.setData(np.array(data, dtype=cols))
         self.table.setVerticalHeaderLabels([str(i) for i in reversed(stats.epoch)])
 
+    def update_config(self, cfg: Config) -> None:
+        """Called when new config file is loaded"""
+        if cfg.name != self.model_name:
+            self._draw_plots()
+            self.model_name = cfg.name
+
     def update_stats(self) -> None:
         """Refresh GUI with updated stats"""
         stats = self.main.stats
         log.debug(f"update stats: epoch={stats.current_epoch} of xrange={stats.xrange}")
         self._update_table(stats)
-        self._update_plots(stats)
+        if stats.current_epoch > 0:
+            self._update_plots(stats)
+        else:
+            self._draw_plots()
 
 
 class Heatmap(pg.GraphicsLayoutWidget):
@@ -514,6 +541,10 @@ class Heatmap(pg.GraphicsLayoutWidget):
                 if val > 0:
                     add_label(self.plot, x, y, val, col)
         self.plot.setTitle(f"Epoch {self.main.stats.current_epoch}")
+
+    def update_config(self, cfg: Config) -> None:
+        """Called when new config file is loaded"""
+        self.plot.clear()
 
     def update_stats(self) -> None:
         """Refresh GUI with updated stats"""
@@ -646,6 +677,7 @@ class ImageViewer(pg.GraphicsLayoutWidget):
                 p.showAxis("top", False)
                 p.showAxis("left", False)
                 p.showAxis("bottom", False)
+                p.getViewBox().setMouseEnabled(x=False, y=False)
                 self.plots.append(p)
 
     @ property
@@ -681,6 +713,10 @@ class ImageViewer(pg.GraphicsLayoutWidget):
         log.debug(f"set transformed => {on}")
         self.transformed = on
         self._update()
+
+    def update_config(self, cfg: Config) -> None:
+        """Called when new config file is loaded"""
+        self.page = 0
 
     def update_stats(self) -> None:
         """Called to update stats data after each epoch"""
@@ -782,9 +818,9 @@ class Histograms(qw.QWidget):
         cols.addWidget(self.layers)
         self.setLayout(cols)
 
-    def update_model(self):
-        """Called when model is updated"""
-        names = self.main.cfg.layer_names
+    def update_config(self, cfg: Config) -> None:
+        """Called when new config file is loaded"""
+        names = cfg.layer_names
         self.layers.set_layers(names)
         for i, name in enumerate(names):
             if i == 0 or "Conv" in name or "Linear" in name:
@@ -817,8 +853,7 @@ class Histograms(qw.QWidget):
             width = float(xpos[1] - xpos[0])
             log.debug(f"layer {ix} hist: orig={xpos[0]:.3} width={width:.3}")
             p = self.plots.addPlot(row=n//cols, col=n % cols)
-            p.setXRange(xpos[0], xpos[-1], padding=0)
-            p.setYRange(0, np.max(height), padding=0)
+            init_plot(p, xrange=(xpos[0], xpos[-1]), yrange=(0, np.max(height)))
             p.setTitle(self.layers.item(ix).text())
             p.addItem(pg.BarGraphItem(x0=xpos[:hist_bins], width=width, height=height, brush="g"))
             n += 1
@@ -852,10 +887,11 @@ class Activations(qw.QWidget):
         cols.addWidget(self.layers)
         self.setLayout(cols)
 
-    def update_model(self):
-        """Called when model is updated"""
-        names = self.main.cfg.layer_names
-        self.plots.set_model(len(names), self.main.data.classes)
+    def update_config(self, cfg: Config) -> None:
+        """Called when new config file is loaded"""
+        names = cfg.layer_names
+        if self.main.data:
+            self.plots.set_model(len(names), self.main.data.classes)
         self.layers.set_layers(names)
         enabled = 0
         for i, name in enumerate(names):
@@ -1134,14 +1170,13 @@ class PlotGrid(pg.GraphicsLayoutWidget):
 
     def _plot(self, data: np.ndarray, cmap=None) -> tuple[pg.PlotItem, pg.ImageItem]:
         """plot data from numpy array in [H, W] or [H, W, C] format"""
-        p = pg.PlotItem()
+        vbox = pg.ViewBox(enableMouse=False, enableMenu=False, defaultPadding=0)
+        p = pg.PlotItem(viewBox=vbox)
         p.showAxis("left", False)
         if self.xlabels:
             set_ticks(p.getAxis("bottom"), self.xlabels)
         else:
             p.showAxis("bottom", False)
-        p.setXRange(0, data.shape[1], padding=0)
-        p.setYRange(0, data.shape[0], padding=0)
         img = pg.ImageItem(data)
         if cmap is not None:
             img.setColorMap(cmap)
@@ -1382,7 +1417,7 @@ def set_ticks(ax, classes):
     ax.setTicks([[(i+0.5, str(val)) for i, val in enumerate(classes)]])
 
 
-def init_plot(p, xlabel=None, ylabel=None, xrange=None, yrange=None, legend=None):
+def init_plot(p, xlabel=None, ylabel=None, xrange=None, yrange=None, legend=None, mouse=False):
     p.clear()
     if xlabel:
         p.setLabel("bottom", xlabel)
@@ -1394,6 +1429,10 @@ def init_plot(p, xlabel=None, ylabel=None, xrange=None, yrange=None, legend=None
         p.setYRange(yrange[0], yrange[1], padding=0)
     if legend:
         p.addLegend(offset=legend, labelTextSize=str(font_size)+"pt")
+    if mouse:
+        p.getViewBox().setMouseMode(pg.ViewBox.PanMode)
+    else:
+        p.getViewBox().setMouseEnabled(x=False, y=False)
 
 
 def add_line(p, xs, ys, color="w", dash=False, name=None):
@@ -1403,6 +1442,21 @@ def add_line(p, xs, ys, color="w", dash=False, name=None):
     else:
         pen = pg.mkPen(color=color, width=2)
     return p.plot(xs[:length], ys[:length], pen=pen, name=name)
+
+
+def update_lines(lines, x, ys):
+    for i, line in enumerate(lines):
+        line.setData(x, ys[i])
+
+
+def update_range(p, max_epochs, yvals):
+    (x0, x1), (y0, y1) = p.viewRange()
+    if x1 > max_epochs:
+        p.setXRange(x0, max_epochs, padding=0)
+    ys = [y[-1] for y in yvals if len(y) > 0]
+    miny, maxy = min(ys), max(ys)
+    if miny < y0 or maxy > y1:
+        p.setYRange(min(miny, y0), max(maxy, y1))
 
 
 def add_label(plot, x, y, val, col):

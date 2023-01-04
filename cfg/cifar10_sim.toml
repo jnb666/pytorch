@@ -74,9 +74,8 @@ transforms = [
 ]
 
 [train]
-optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=5e-5} ]
-scheduler = ["StepLRandWeightDecay", {step_size=15, gamma=0.5} ]
+optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=2e-5} ]
+scheduler = ["StepLR", {step_size=25, gamma=0.4} ]
 stop = {epochs=3, extra=5, avg=20}
-epochs = 100
+epochs = 125
 shuffle = true
-

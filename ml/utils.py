@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 torch.set_printoptions(precision=3, threshold=1000, edgeitems=4, linewidth=180)
-np.set_printoptions(precision=6, suppress=True, threshold=1000, edgeitems=4, linewidth=160)
+np.set_printoptions(precision=5, suppress=True, threshold=1000, edgeitems=4, linewidth=160)
 pp = pprint.PrettyPrinter(indent=2)
 
 

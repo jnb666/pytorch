@@ -72,8 +72,8 @@ class Model(nn.Sequential):
                 log.info(f"layer {i:2}: {name:<12} {list(x.size()[1:])} {params}")
                 total_params += nparams
         log.info(f"total params = {total_params}")
-        for typ, params in weight_init.items():
-            log.info(f"{typ:30}: {params}")
+        for typ in sorted(weight_init.keys()):
+            log.info(f"{typ:30}: {weight_init[typ]}")
 
     def activations(self, input: Tensor, layers: list[int], hist_bins: int = 0) -> dict[int, Any]:
         """Evaluate model and returns activations or histograms of activations for each layer given"""
