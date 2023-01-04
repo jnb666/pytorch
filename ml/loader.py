@@ -114,7 +114,6 @@ class DBLoader(Loader):
 
     def load_stats(self, stats: Stats) -> None:
         stats.load_state_dict(self.db.load("ml:stats", device=self.device))
-        log.debug(f"loaded stats from DB: epoch={stats.current_epoch} running={stats.running}")
 
     def get_activations(self, layers: list[int], index: int) -> dict[int, Tensor]:
         missing = self.db.check_exists("ml:activations", [f"{i}:{index}" for i in layers])

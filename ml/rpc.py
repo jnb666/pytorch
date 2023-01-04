@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import logging as log
@@ -32,12 +33,17 @@ class State:
     epoch: int = -1
     max_epoch: int = 0
     running: bool = False
+    models: list[str] = field(default_factory=list)
+    checksum: str = ""
 
     def dump(self) -> str:
         return json.dumps(self.__dict__)
 
     def load(self, data: bytes) -> None:
         self.__dict__ = json.loads(data)
+
+    def update(self, s: "State") -> None:
+        self.__dict__.update(s.__dict__)
 
 
 class Database:
@@ -62,20 +68,20 @@ class Database:
                 name = path.basename(file).removesuffix(".toml")
                 p.hset("ml:config", name, f.read())
         p.execute()
+        self.set_model_state()
 
-    def update_config(self, file: str) -> None:
+    def update_config(self, file: str) -> State:
         """Called when config file is created, updated or deleted"""
-        if not file.endswith(".toml"):
-            return
-        name = path.basename(file).removesuffix(".toml")
-        try:
-            with open(file, encoding="utf-8") as f:
-                log.info(f"updated config: {name}")
-                self.db.hset("ml:config", name, f.read())
-
-        except FileNotFoundError:
-            log.info(f"removed config: {name}")
-            self.db.hdel("ml:config", name)
+        if file.endswith(".toml"):
+            name = path.basename(file).removesuffix(".toml")
+            try:
+                with open(file, encoding="utf-8") as f:
+                    log.info(f"updated config: {name}")
+                    self.db.hset("ml:config", name, f.read())
+            except FileNotFoundError:
+                log.info(f"removed config: {name}")
+                self.db.hdel("ml:config", name)
+        return self.set_model_state()
 
     def get_config(self, name: str) -> str:
         """Get toml config data as a string"""
@@ -113,8 +119,22 @@ class Database:
         self.save(stats.state_dict(), f"ml:stats")
         self.db.delete("ml:activations")
         self.db.delete("ml:histograms")
-        self.db.set("ml:state", state.dump())
+        self.set_model_state(state)
         return stats
+
+    def set_model_state(self, state: State | None = None) -> State:
+        """Refresh model checksum and list of models in state hash"""
+        if state is None:
+            state = self.get_state()
+        state.models = self.get_models()
+        if state.name:
+            data = self.db.hget("ml:config", state.name)
+            if data:
+                m = hashlib.sha256()
+                m.update(data)
+                state.checksum = m.hexdigest()
+        self.db.set("ml:state", state.dump())
+        return state
 
     def get_state(self) -> State:
         """Get current state"""
@@ -133,7 +153,7 @@ class Database:
         state.running = running
         self.db.set("ml:state", state.dump())
 
-    def update(self, stats: Stats, clear: bool = False) -> None:
+    def update(self, stats: Stats, clear: bool = False, epochs: list[int] | None = None) -> None:
         """Save stats and state key"""
         state = self.get_state()
         state.running = stats.running
@@ -141,7 +161,9 @@ class Database:
             state.max_epoch = stats.xrange[1]
         if state.running or stats.current_epoch > 0:
             state.epoch = stats.current_epoch
-        if stats.current_epoch > 0 and stats.current_epoch not in state.epochs:
+        if epochs:
+            state.epochs = epochs
+        elif stats.current_epoch > 0 and stats.current_epoch not in state.epochs:
             state.epochs.append(stats.current_epoch)
             state.epochs.sort()
         self.save(stats.state_dict(), "ml:stats")
@@ -195,6 +217,7 @@ class BaseContext:
         self.trainer: Trainer | None = None
         self.ds: Datasets | None = None
         self.stats = Stats()
+        self.epochs: list[int] = []
 
     @property
     def epoch(self) -> int:
@@ -231,6 +254,8 @@ class BaseContext:
             return False
         self.trainer.cfg.save()
         self.stats = self.trainer.resume_from(epoch, self.device)
+        if self.trainer.stopper:
+            self.trainer.stopper.update_stats(self.stats)
         return True
 
     def do_epoch(self, should_stop: Callable[[], bool] | None = None) -> bool:
@@ -251,7 +276,8 @@ class BaseContext:
 
         self.stats.current_epoch += 1
         self.stats.predict = self.trainer.predict
-        self.stats.update(self.trainer.learning_rate(), train_loss, test_loss, test_accuracy, valid_loss, valid_accuracy)
+        self.stats.update(self.trainer.learning_rate(), train_loss, test_loss,
+                          test_accuracy, valid_loss, valid_accuracy)
         stop = self.trainer.should_stop(self.stats)
         self.stats.running = not stop
 
@@ -261,7 +287,23 @@ class BaseContext:
 
         if stop or (self.epoch % (10*self.log_every) == 0):
             log.info(f"  Elapsed time = {self.stats.elapsed_total()}")
+
+        if stop:
+            self.epochs = self.clear_checkpoints(self.trainer.cfg.dir)
         return stop
+
+    def clear_checkpoints(self, dir: str) -> list[int]:
+        """Remove old checkpoint files from previous runs and return current epoch list"""
+        epochs = []
+        for file in glob(path.join(dir, "model_*.pt")):
+            epoch = int(path.basename(file)[6:-3])
+            if epoch > self.epoch:
+                log.debug(f"remove: {file}")
+                os.remove(file)
+            else:
+                epochs.append(epoch)
+        epochs.sort()
+        return epochs
 
     def run(self) -> None:
         raise NotImplementedError("abstract method")
@@ -310,7 +352,7 @@ class Server(BaseContext):
                 if self.do_epoch(should_stop=self.get_command):
                     self.stats.running = False
                     self.paused = True
-                self.db.update(self.stats, clear=not self.paused)
+                self.db.update(self.stats, clear=self.stats.running, epochs=self.epochs)
 
     def load(self, name: str) -> None:
         log.info(f"cmd: load {name}")
@@ -357,6 +399,8 @@ class Server(BaseContext):
         if on or self.started:
             log.info(f"cmd: pause {on}")
             self.paused = on
+            if self.started and self.trainer and self.trainer.stopper:
+                self.trainer.stopper.update_stats(self.stats)
             self.db.set_running(not on)
             self.ok()
         else:
@@ -419,3 +463,26 @@ class Server(BaseContext):
     def error(self, msg: str) -> None:
         log.error(f"error: {msg}")
         self.socket.send_json(["error", msg])
+
+
+class Client:
+    """0MQ client class to send commands"""
+
+    def __init__(self, host: str):
+        ctx = zmq.Context()
+        log.info(f"zmq: connect to server at {host}:{zmq_port}")
+        self.socket = ctx.socket(zmq.REQ)
+        self.socket.connect(f"tcp://{host}:{zmq_port}")
+
+    def send(self, *cmd) -> tuple[str, str]:
+        """send command to server - returns ("ok"|"error", "errmsg") """
+        start = time.time()
+        self.socket.send_json(cmd)
+        status = self.socket.recv_json()
+        elapsed = time.time() - start
+        if not isinstance(status, list) or len(status) != 2:
+            raise RuntimeError(f"send: malformed response: {status}")
+        if status[0] != "ok":
+            log.error(f"{cmd[0]} error: {status[1]}")
+        log.info(f"sent cmd: {cmd} {elapsed:.3f}s")
+        return status[0], status[1]

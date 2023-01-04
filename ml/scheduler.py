@@ -115,5 +115,5 @@ class StepLRandWeightDecay(object):
         for i, param_group in enumerate(self.optimizer.param_groups):
             param_group['lr'] = lr_values[i]
             param_group['weight_decay'] = wd_values[i]
-            if i == 0 and self.last_epoch % self.step_size == 0:
+            if self._step_count > 1 and i == 0 and self.last_epoch % self.step_size == 0:
                 log.info(f'Adjusting learning rate to  {lr_values[0]:.5} and weight decay to {wd_values[0]:.5}.')

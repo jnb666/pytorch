@@ -1,10 +1,12 @@
 TODO
 ====
-- add clear flag to clear out old checkpoints
+- save gui selections to file and restore when model is loaded
 
 - move img menu to bottom
 
 - check repeatable runs
+
+- improve error handling to catch config errors
 
 - CPU and memory profiling
 
@@ -19,7 +21,7 @@ TODO
 
 - service + RPC interface using ZMQ:
    commands to server - all return status: [client REQ and server REP] 
-        [ "load", "file.toml" ]                 stop training, load model and stats from last run
+        [ "load", "name" ]                      stop training, load model and stats from last run
         [ "start", epoch, clear ]               stop training, init weights and optimizer if epoch=0 else load from checkpoint
                                                 clear old checkpoints if clear flag is set
         [ "max_epoch", n ]                      set max epoch limit

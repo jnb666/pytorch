@@ -30,7 +30,8 @@ def main():
 
     app = ml.init_gui()
     win = ml.MainWindow(loader, model=name)
-    win.load(running=False)
+    win.update_config(name, running=False)
+    win.update_stats()
     win.show()
     sys.exit(app.exec())
 

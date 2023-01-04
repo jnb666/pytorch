@@ -7,17 +7,25 @@ import sys
 from os import path
 
 import ml
-from inotify_simple import INotify, flags
+from inotify_simple import INotify, flags  # type: ignore
 
 
 def watch_config(dir: str):
     db = ml.Database("localhost")
+    client = ml.Client("localhost")
+
     inotify = INotify()
     wd = inotify.add_watch(dir, flags.CREATE | flags.DELETE | flags.MODIFY | flags.DELETE_SELF |
                            flags.MOVED_TO | flags.MOVED_FROM | flags.MOVE_SELF)
+    state = db.get_state()
     while True:
         for event in inotify.read():
-            db.update_config(path.join(dir, event.name))
+            s = db.update_config(path.join(dir, event.name))
+            log.debug(f"inotify: {s}")
+            # reload config if changed on disk and run is not in progress
+            if s.name == state.name and not s.running and s.checksum != state.checksum:
+                client.send("load", s.name)
+            state.update(s)
 
 
 def main():

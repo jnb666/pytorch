@@ -25,7 +25,7 @@ default_weight_init = {
 default_bias_init = {
     "Linear": ["constant", 0],
     "Conv": ["constant", 0],
-    "BatchNorm": ["constant", 1],
+    "BatchNorm": ["constant", 0],
 }
 
 
@@ -157,7 +157,6 @@ class Config():
                 names.append(args[0])
             else:
                 names.extend([sub[0] for sub in defn])
-        log.debug(f"layer names for {self.name}: {names}")
         return names
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:

@@ -115,9 +115,7 @@ class Stopper:
         if len(stats.valid_loss) == 0:
             return False
 
-        samples = min(self.avg, len(stats.valid_loss))
-        avg = statistics.mean(stats.valid_loss[-samples:])
-        stats.valid_loss_avg.append(avg)
+        stats.valid_loss_avg.append(mean(stats.valid_loss, len(stats.valid_loss)-1, self.avg))
         if len(stats.valid_loss_avg) < self.epochs + 1:
             return False
 
@@ -135,6 +133,11 @@ class Stopper:
         else:
             log.debug(f"valid_avg={val:.4} {prev}")
         return False
+
+    def update_stats(self, stats: Stats):
+        """In case where run is restarted - recalc average loss as config may have changed"""
+        for i in range(len(stats.valid_loss_avg)):
+            stats.valid_loss_avg[i] = mean(stats.valid_loss, i, self.avg)
 
 
 class Datasets:
@@ -330,3 +333,7 @@ def to_list(tuple):
         else:
             res.append(x)
     return res
+
+
+def mean(vals: list[float], i: int, avg: int) -> float:
+    return statistics.mean(vals[max(i+1-avg, 0):i+1])

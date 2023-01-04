@@ -113,7 +113,6 @@ class MainWindow(qw.QWidget):
         self.stats = Stats()
         self.predict = None
         self.epochs = 100
-        self._model = model
         self._loader = loader
         self._sender = sender
         self._activations: dict[int, Any] = {}
@@ -136,10 +135,6 @@ class MainWindow(qw.QWidget):
         self.setLayout(cols)
         self.opts = Options().load()
         self._set_size()
-
-    def load(self, running: bool) -> None:
-        """Call to load the initial model"""
-        self.update_config(self._model, running)
 
     def _set_size(self) -> None:
         if self.opts.xpos >= 0 and self.opts.ypos >= 0:
@@ -189,20 +184,14 @@ class MainWindow(qw.QWidget):
         self.pages[3].update_model()
         self.pages[4].update_model()
         self.pages[5].set_text(self.cfg.text)
-        if self._sender and not running:
-            self._sender("load", name)
         self.data.reset()
         self.cmd_menu.update_config(self.cfg, self.stats, self._loader.get_models())
-        # if using 0MQ / redis then stats update gets called via notification callback
-        if not self._sender:
-            self.update_stats()
 
     def update_stats(self) -> None:
         """Refresh GUI with updated stats and model weights"""
         if not self.cfg:
             return
         self._loader.load_stats(self.stats)
-        log.debug(f"updated stats: {self.cfg.name} epoch={self.stats.current_epoch} running={self.stats.running}")
         self.cmd_menu.update_stats(self.stats)
         if len(self.stats.predict):
             self.predict = torch.clone(self.stats.predict)
@@ -210,6 +199,7 @@ class MainWindow(qw.QWidget):
         self._histograms = {}
         index = self.content.currentIndex()
         self.pages[index].update_stats()
+        log.debug(f"updated stats: {self.cfg.name} epoch={self.stats.current_epoch} running={self.stats.running}")
 
     def _activ_cached(self, layers: list[int], index: int) -> bool:
         try:
@@ -271,7 +261,6 @@ class CommandMenu(qw.QWidget):
         set_background(self, menu_bgcolor)
         self.main = main
         self.send = main._sender
-        self.epochs: list[int] = []
         self.models = main._loader.get_models()
         layout = self._build(model)
         self.setLayout(layout)
@@ -282,7 +271,7 @@ class CommandMenu(qw.QWidget):
         self._elapsed = qw.QLabel()
         self._learn_rate = qw.QLabel()
         self.model_select = qw.QComboBox()
-        self.model_select.addItems(["select model"] + self.models)
+        self.model_select.addItems(self.models)
         self.model_select.setCurrentText(model)
         self.model_select.currentIndexChanged.connect(self._select_model)  # type: ignore
 
@@ -294,6 +283,7 @@ class CommandMenu(qw.QWidget):
             self.stop.setEnabled(False)
             self.stop.clicked.connect(self._stop)  # type: ignore
             self.resume_from = qw.QComboBox()
+            self.resume_from.setMinimumWidth(50)
             self.resume = qw.QPushButton("resume")
             self.resume.setEnabled(False)
             self.resume.clicked.connect(self._resume)  # type: ignore
@@ -303,6 +293,7 @@ class CommandMenu(qw.QWidget):
             self.max_epoch.editingFinished.connect(self._set_max_epoch)  # type: ignore
 
         cols = qw.QHBoxLayout()
+        cols.setContentsMargins(margins, margins, margins, margins)
         cols.addWidget(self.model_select)
         if self.send:
             cols.addSpacing(spacing)
@@ -324,23 +315,6 @@ class CommandMenu(qw.QWidget):
         cols.addStretch()
         return cols
 
-    def _update_epochs(self, epoch: int, select: bool = False):
-        log.debug(f"update_epochs: {epoch} {select}")
-        if not self.epochs or select:
-            self.epochs = self.main._loader.get_epochs()
-            self.resume_from.clear()
-            self.resume_from.addItems([str(i) for i in self.epochs])
-        if not (epoch in self.epochs):
-            self.epochs.append(epoch)
-            self.epochs.sort()
-            self.resume_from.clear()
-            self.resume_from.addItems([str(i) for i in self.epochs])
-        if select:
-            self.resume_from.setCurrentText(str(epoch))
-
-    def update_config_files(self):
-        """Refresh config info"""
-
     def update_config(self, cfg: Config, stats: Stats, models: list[str]) -> None:
         """Called when new config file is loaded or config files are changed"""
         if models != self.models:
@@ -348,10 +322,11 @@ class CommandMenu(qw.QWidget):
             model = self.model_select.currentText()
             self.model_select.currentIndexChanged.disconnect()  # type: ignore
             self.model_select.clear()
-            self.model_select.addItems(["select model"] + models)
+            self.model_select.addItems(models)
             self.model_select.setCurrentText(model)
             self.model_select.currentIndexChanged.connect(self._select_model)  # type: ignore
         if self.send:
+            self._update_epoch_list(stats.current_epoch)
             self.max_epoch.setText(str(cfg.epochs))
         self.update_stats(stats)
 
@@ -362,17 +337,29 @@ class CommandMenu(qw.QWidget):
         if len(stats.learning_rate):
             self._learn_rate.setText(f"lr: {stats.learning_rate[-1]:.4}")
         if self.send:
-            self._update_epochs(stats.current_epoch, not stats.running)
             self.model_select.setEnabled(not stats.running)
             self.start.setEnabled(not stats.running)
             self.resume.setEnabled(not stats.running)
             self.stop.setEnabled(stats.running)
+            if not stats.running:
+                self._update_epoch_list(stats.current_epoch)
+
+    def _update_epoch_list(self, epoch: int):
+        epochs = self.main._loader.get_epochs()
+        self.resume_from.clear()
+        self.resume_from.addItems([str(i) for i in epochs])
+        self.resume_from.setCurrentText(str(epoch))
 
     def _select_model(self, index):
-        if index > 0:
-            name = self.model_select.itemText(index)
-            log.debug(f"select model {index} => {name}")
-            QTimer.singleShot(0, lambda: self.main.update_config(name))
+        name = self.model_select.itemText(index)
+        if self.send:
+            def load_model():
+                self.send("load", name)
+        else:
+            def load_model():
+                self.main.update_config(name)
+                self.main.update_stats()
+        QTimer.singleShot(0, load_model)
 
     def _start(self):
         QTimer.singleShot(0, lambda: self.send("start", 0, False))
@@ -428,11 +415,10 @@ class StatsPlots(qw.QWidget):
         self.table = pg.TableWidget(editable=False, sortable=False)
         plots = self._draw_plots(main.epochs)
         cols = qw.QHBoxLayout()
+        cols.setContentsMargins(0, 0, 0, 0)
         cols.addWidget(self.table, 2)
         cols.addWidget(plots, 3)
-        layout = qw.QVBoxLayout()
-        layout.addLayout(cols)
-        self.setLayout(layout)
+        self.setLayout(cols)
 
     def _draw_plots(self, epochs: int) -> pg.GraphicsWidget:
         w = pg.GraphicsLayoutWidget()
@@ -597,7 +583,6 @@ class ImageMenu(qw.QWidget):
 
     def set_classes(self, classes: list[str]) -> None:
         """Assign list of classes"""
-        log.debug(f"ImageMenu num_classes={len(classes)}")
         self._combo.clear()
         self._combo.addItems(["all classes"] + classes)
         self.target_class = -1
@@ -799,7 +784,6 @@ class Histograms(qw.QWidget):
 
     def update_model(self):
         """Called when model is updated"""
-        log.debug("Histograms: update model")
         names = self.main.cfg.layer_names
         self.layers.set_layers(names)
         for i, name in enumerate(names):
@@ -870,7 +854,6 @@ class Activations(qw.QWidget):
 
     def update_model(self):
         """Called when model is updated"""
-        log.debug("Activations: update model")
         names = self.main.cfg.layer_names
         self.plots.set_model(len(names), self.main.data.classes)
         self.layers.set_layers(names)

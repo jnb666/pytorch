@@ -37,9 +37,9 @@ transforms = [
 ]
 
 [train]
-optimizer = ["Adam", {lr = 0.0005} ]
-scheduler = ["StepLR", {step_size=20, gamma=0.2} ]
-epochs = 60
+optimizer = ["Adam", {lr = 0.001} ]
+scheduler = ["StepLR", {step_size=10, gamma=0.5} ]
+epochs = 50
 shuffle = true
-stop = {epochs=3, extra=2, avg=10}
+stop = {epochs=3, avg=12}
 
