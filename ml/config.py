@@ -1,13 +1,10 @@
 import logging as log
-import math
 import os
-import shutil
-import sys
 from glob import glob
 from os import path
 from typing import Any
 
-import kornia as K  # type: ignore
+import kornia as K
 import tomli
 import torch
 import torchvision  # type: ignore
@@ -16,7 +13,20 @@ from torch import Tensor, nn
 
 from .dataset import Dataset
 from .scheduler import StepLRandWeightDecay
-from .utils import pformat
+from .utils import (DatasetNotFoundError, InvalidConfigError, get_module,
+                    pformat)
+
+default_weight_init = {
+    "Linear": ["kaiming_normal", {"nonlinearity": "relu"}],
+    "Conv": ["kaiming_normal", {"nonlinearity": "relu"}],
+    "BatchNorm": ["constant", 1],
+}
+
+default_bias_init = {
+    "Linear": ["constant", 0],
+    "Conv": ["constant", 0],
+    "BatchNorm": ["constant", 1],
+}
 
 
 class Config():
@@ -24,8 +34,13 @@ class Config():
 
     Args:
         file:str    config file in toml format
+        data:str    content of config if loading from string
+        name:str    config name if loading from string
         rundir:str  root directory to save run state
         epochs:int  number of epochs to train - if non-zero overrides the config
+        seed:int    random number seed - if non-zero overrides the config
+
+    Either file or name and data must be set
 
     Attributes:
         name:str    basename of config
@@ -37,25 +52,45 @@ class Config():
         train:dict  training config
     """
 
-    def __init__(self, file: str, rundir: str, epochs: int = 0):
-        try:
-            with open(file, mode="rb") as f:
-                self.cfg = tomli.load(f)
-        except FileNotFoundError:
-            print(f"Error: config file '{file}' not found")
-            sys.exit(1)
-        except tomli.TOMLDecodeError as err:
-            print(f"Error: config file '{file}': {err}")
-            sys.exit(1)
+    def __init__(self, rundir: str, name: str = "", data: str = "", file: str = "",  epochs: int = 0, seed: int = 0):
+        if data:
+            if not name:
+                raise ValueError("Config: name must be set if loading from string")
+            self.name = name
+            self.text = data
+        else:
+            try:
+                with open(file, mode="r", encoding="utf-8") as f:
+                    self.text = f.read()
+                self.name = path.basename(file).removesuffix(".toml")
+            except FileNotFoundError as err:
+                raise InvalidConfigError(f"file not found: {err}")
 
-        self.file: str = file
-        self.name: str = os.path.basename(file).removesuffix(".toml")
+        try:
+            self.cfg = tomli.loads(self.text)
+        except tomli.TOMLDecodeError as err:
+            raise InvalidConfigError(f"error decoding config: {err}")
         self.version = str(self.cfg.get("version", "1"))
         self.half = self.cfg.get("half", False)
         self.dir: str = path.join(rundir, self.name, self.version)
         self.train = self.cfg.get("train", {})
+        self.transform = self.cfg.get("transform", {})
+        self.weight_init = default_weight_init.copy()
+        self.weight_init.update(self.cfg.get("weight_init", {}))
+        self.bias_init = default_bias_init.copy()
+        self.bias_init.update(self.cfg.get("bias_init", {}))
+        if seed != 0:
+            self.seed = seed
+        else:
+            self.seed = int(self.train.get("seed", 1))
         if epochs != 0:
-            self.train["epochs"] = epochs
+            self.epochs = epochs
+        else:
+            self.epochs = int(self.train.get("epochs", 100))
+        try:
+            self.layer_names = self._get_layer_names()
+        except KeyError:
+            raise InvalidConfigError("model layer definition missing or invalid")
 
     def save(self, clear: bool = False) -> None:
         """Save a copy of the config file to the run directory and optionally clear any data from prior runs."""
@@ -65,9 +100,10 @@ class Config():
                 os.remove(file)
         if not path.exists(self.dir):
             os.makedirs(self.dir)
-        shutil.copy(self.file, path.join(self.dir, "config.yaml"))
+        with open(path.join(self.dir, "config.yaml"), mode="w", encoding="utf-8") as f:
+            f.write(self.text)
 
-    def _data(self, typ):
+    def data(self, typ: str) -> dict[str, Any]:
         if typ == "train":
             cfg = self.cfg["train_data"]
         elif typ == "test":
@@ -75,29 +111,27 @@ class Config():
         elif typ == "valid":
             cfg = self.cfg.get("valid_data", {})
         else:
-            raise ValueError(f"invalid dataset type: {typ}")
+            raise InvalidConfigError(f"invalid dataset type: {typ}")
         return cfg
 
-    def dataset(self,
-                root: str,
-                typ: str = "test",
-                device: str = "cpu",
-                dtype: torch.dtype = torch.float32
-                ) -> Dataset | None:
-        """Load a new train, test or valid dataset and apply normalization if defined."""
-        cfg = self._data(typ)
+    def dataset(self, root: str, typ: str = "test", device: str = "cpu",
+                dtype: torch.dtype = torch.float32) -> Dataset:
+        """Load a new train, test or valid dataset and applies normalization if defined.
+
+        Raises DatasetNotFoundError if it does not exist - e.g. for optional valid dataset
+        """
+        cfg = self.data(typ)
         if len(cfg) == 0:
-            return None
+            raise DatasetNotFoundError(typ)
         train = cfg.get("train", False)
         batch_size = cfg.get("batch_size", 0)
         start = cfg.get("start", 0)
         end = cfg.get("end", 0)
         ds = Dataset(cfg["dataset"], root, train=train, batch_size=batch_size,
                      device=device, dtype=dtype, start=start, end=end)
-        log.info(f"== {typ} data: ==\n{ds}")
         try:
             args = cfg["normalize"]
-            log.info(f"normalize: {args}")
+            log.debug(f"normalize: {args}")
             ds.data = F.normalize(ds.data, args[0], args[1], inplace=True)
         except KeyError:
             pass
@@ -112,35 +146,19 @@ class Config():
         transform = nn.Sequential()
         for args in config:
             transform.append(get_module(K.augmentation, args))
-        log.info(f"== transforms: ==\n{transform}")
         return transform
 
-    def model(self, device: str = "cpu", input: torch.Tensor | None = None, init_weights: bool = True) -> nn.Module:
-        """Create a new model instance based on the config [model] layers definition."""
-        model = nn.Sequential()
+    def _get_layer_names(self) -> list[str]:
         cfg = self.cfg["model"]
+        names = ["input"]
         for args in cfg["layers"]:
             defn = cfg.get(args[0])
-            argv = args.copy()
-            if defn is not None:
-                vars = argv.pop() if len(argv) > 1 else {}
-                log.debug(f"get_definition: {defn} {argv[0]} {vars}")
-                for layer in get_definition(torch.nn, defn, vars):
-                    model.append(layer.to(device))
+            if defn is None:
+                names.append(args[0])
             else:
-                layer = get_module(torch.nn, args)
-                model.append(layer.to(device))
-        if input is not None:
-            check_model(model, input)
-        log.info(f"== Model: ==\n{model}")
-        if init_weights:
-            wparams = self.cfg.get("weight_init")
-            if wparams:
-                init_layers(model, wparams)
-            bparams = self.cfg.get("bias_init")
-            if bparams:
-                init_layers(model, bparams, mode="bias")
-        return model
+                names.extend([sub[0] for sub in defn])
+        log.debug(f"layer names for {self.name}: {names}")
+        return names
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Create a new optimizer based on config [train] optimizer setting"""
@@ -161,90 +179,3 @@ class Config():
 
     def __str__(self):
         return pformat(self.cfg)
-
-
-def init_layers(model: nn.Sequential, params: dict[str, list[Any]], mode: str = "weight") -> None:
-    log.info(f"{mode} init: {pformat(params)}")
-    for i, layer in enumerate(model):
-        weights = getattr(layer, mode, None)
-        if weights is not None:
-            for typ, args in params.items():
-                if getattr(torch.nn, typ) == type(layer):
-                    if len(args) >= 2 and isinstance(args[-1], dict):
-                        kwargs = args.pop().copy()
-                    else:
-                        kwargs = {}
-                    log.debug(f"{i}: init {typ} {mode}: {args} {kwargs}")
-                    getattr(torch.nn.init, args[0]+"_")(weights, *args[1:], **kwargs)
-
-
-def check_model(model: nn.Sequential, input: Tensor):
-    """Do a forward pass to check model structure and instantiate lazy layers"""
-    x = input
-    total_params = 0
-    half_on = input.dtype == torch.float16
-    log.info(f"half mode = {half_on}")
-    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=half_on):
-        for i, layer in enumerate(model):
-            try:
-                x = layer(x)
-            except RuntimeError as err:
-                print(f"Error in layer {i+1}: {layer} definition\n  {err}")
-                sys.exit(1)
-            name = str(layer)
-            name = name[:name.index("(")]
-            params = 0
-            for val in layer.state_dict().values():
-                params += math.prod(val.size())
-            if params > 0:
-                log.info(f"layer {i:2}: {name:<12} {list(x.size())}  params={params}")
-            else:
-                log.info(f"layer {i:2}: {name:<12} {list(x.size())}")
-            total_params += params
-    log.info(f"total params = {total_params}")
-
-
-def get_definition(pkg, defn, vars):
-    layers = []
-    for args in defn:
-        layer = get_module(pkg, args, vars)
-        layers.append(layer)
-    return layers
-
-
-def get_module(pkg, args, vars=None):
-    args = list(args).copy()
-    kwargs = {}
-    if len(args) > 1 and isinstance(args[-1], dict):
-        kwargs = args.pop().copy()
-    for i, arg in enumerate(args[1:]):
-        args[1+i] = getarg(arg, vars)
-    for name, arg in kwargs.items():
-        kwargs[name] = getarg(arg, vars)
-    cname = args[0]
-    if cname == "Linear" or cname == "Conv2d" or cname == "BatchNorm2d":
-        cname = "Lazy" + cname
-    try:
-        fn = getattr(pkg, cname)(*args[1:], **kwargs)
-    except AttributeError as err:
-        print(f"Error: invalid func {args} {kwargs} - {err}")
-        sys.exit(1)
-    return fn
-
-
-def getarg(arg, vars):
-    if isinstance(arg, list) and len(arg) == 2:
-        return (_arg(arg[0], vars), _arg(arg[1], vars))
-    if isinstance(arg, list):
-        return [_arg(i) for i in arg]
-    return _arg(arg, vars)
-
-
-def _arg(arg, vars):
-    if vars and isinstance(arg, str) and arg.startswith("$"):
-        try:
-            return vars[arg[1:]]
-        except KeyError:
-            print(f"Error: Variable not defined in config: {arg}")
-            sys.exit(1)
-    return arg

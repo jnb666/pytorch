@@ -10,25 +10,44 @@ import numpy as np
 import torch
 
 torch.set_printoptions(precision=3, threshold=1000, edgeitems=4, linewidth=180)
-np.set_printoptions(precision=3, suppress=True, threshold=1000, edgeitems=4, linewidth=160)
+np.set_printoptions(precision=6, suppress=True, threshold=1000, edgeitems=4, linewidth=160)
 pp = pprint.PrettyPrinter(indent=2)
 
 
-def init_logger(debug: bool = False, logdir: str = "") -> None:
+class InvalidConfigError(Exception):
+    pass
+
+
+class DatasetNotFoundError(Exception):
+    pass
+
+
+class RunInterrupted(Exception):
+    pass
+
+
+def init_logger(debug: bool = False, with_timestamp=True) -> None:
     """Initialise logger instance and optionally enable debug messages or log file with millisecond timestamps."""
     level = log.DEBUG if debug else log.INFO
-    log.basicConfig(format="%(message)s", level=level)
-    if not logdir:
-        return
-    if not path.exists(logdir):
-        os.makedirs(logdir)
-    file = path.join(logdir, time.strftime("%Y%m%d_%H%M%S") + ".log")
-    log.info(f"writing log to {file}")
+    if with_timestamp:
+        log.basicConfig(format="%(asctime)s.%(msecs)03d  %(message)s", datefmt="%H:%M:%S", level=level)
+    else:
+        log.basicConfig(format="%(message)s", level=level)
+
+
+def set_logdir(dir: str) -> None:
+    """Add logging to directory"""
+    logger = log.getLogger("")
+    if not path.exists(dir):
+        os.makedirs(dir)
+    file = path.join(dir, time.strftime("%Y%m%d_%H%M%S") + ".log")
     handler = log.FileHandler(file, encoding="utf-8")
-    handler.setLevel(level)
-    handler.setFormatter(log.Formatter(
-        "%(asctime)s.%(msecs)03d  %(message)s", datefmt="%H:%M:%S"))
-    log.getLogger("").addHandler(handler)
+    handler.setLevel(logger.getEffectiveLevel())
+    handler.setFormatter(log.Formatter("%(asctime)s.%(msecs)03d  %(message)s", datefmt="%H:%M:%S"))
+    for i in range(1, len(logger.handlers)):
+        logger.removeHandler(logger.handlers[i])
+    log.info(f"writing log to {file}")
+    logger.addHandler(handler)
 
 
 def pformat(data) -> str:
@@ -36,26 +55,65 @@ def pformat(data) -> str:
     return pp.pformat(data)
 
 
-def get_device(cpu: bool, seed: int) -> str:
-    """Get cuda or cpu device and initialise random number seed"""
-    log.info(f"== pytorch {torch.__version__} ==")
+def get_device(cpu: bool) -> str:
+    """Get cuda or cpu device"""
     if not cpu and torch.cuda.is_available():
         device = "cuda"
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     else:
         device = "cpu"
-    random.seed(seed)
-    torch.manual_seed(seed)
-    log.info(f'Using {device} device  seed={seed}')
+    log.info(f"== pytorch {torch.__version__}  device={device} ==")
     return device
 
 
-def load_checkpoint(dir: str, epoch: int | None, device: str = "cpu") -> dict[str, Any]:
-    """load checkpoint dict from given directory"""
-    if epoch is None:
-        file = path.join(dir, "model.pt")
-    else:
-        file = path.join(dir, f"model_{epoch}.pt")
-    log.debug(f"load checkpoint from {file} map_location={device}")
-    return torch.load(file, map_location=device)
+def set_seed(seed: int) -> None:
+    """Initialise pytorch, numpy and python random seed"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    log.info(f'Set random seed={seed}')
+
+
+def get_definition(pkg, defn, vars, expand=None):
+    layers = []
+    for args in defn:
+        log.debug(f"add layer: {args} vars={vars}")
+        layer = get_module(pkg, args, vars, expand)
+        layers.append(layer)
+    return layers
+
+
+def get_module(pkg, args, vars=None, expand=None):
+    args = list(args).copy()
+    if expand:
+        args[0] = expand(args[0])
+    kwargs = {}
+    if len(args) > 1 and isinstance(args[-1], dict):
+        kwargs = args.pop().copy()
+    for i, arg in enumerate(args[1:]):
+        args[1+i] = getarg(arg, vars)
+    for name, arg in kwargs.items():
+        kwargs[name] = getarg(arg, vars)
+    try:
+        fn = getattr(pkg, args[0])(*args[1:], **kwargs)
+    except AttributeError as err:
+        raise InvalidConfigError(f"invalid function {args} {kwargs} - {err}")
+    return fn
+
+
+def getarg(arg, vars):
+    if isinstance(arg, list) and len(arg) == 2:
+        return (_arg(arg[0], vars), _arg(arg[1], vars))
+    if isinstance(arg, list):
+        return [_arg(i) for i in arg]
+    return _arg(arg, vars)
+
+
+def _arg(arg, vars):
+    if vars and isinstance(arg, str) and arg.startswith("$"):
+        try:
+            return vars[arg[1:]]
+        except KeyError:
+            raise InvalidConfigError(f"variable not defined in config: {arg}")
+    return arg

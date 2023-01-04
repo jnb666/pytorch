@@ -49,10 +49,6 @@ layers = [
 Linear = ["xavier_uniform"]
 Conv2d = ["xavier_uniform"]
 
-[bias_init]
-Linear = ["constant", 0]
-Conv2d = ["constant", 0]
-
 [transform]
 transforms = [
   ["RandomHorizontalFlip", {p=0.5} ],
@@ -62,6 +58,6 @@ transforms = [
 [train]
 optimizer = ["SGD", {lr=0.01, momentum=0.9, nesterov=true, weight_decay=1e-5} ]
 scheduler = ["StepLRandWeightDecay", {step_size=20, gamma=0.2} ]
-stop = {epochs=2, extra=4, ema=20}
+stop = {epochs=2, extra=4, avg=20}
 epochs = 100
 shuffle = true

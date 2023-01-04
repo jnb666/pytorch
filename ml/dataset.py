@@ -1,10 +1,11 @@
 import logging as log
-import sys
 
 import numpy as np
 import torch
 import torchvision  # type: ignore
 from torch import Tensor, nn
+
+from .utils import InvalidConfigError
 
 
 class Dataset:
@@ -30,20 +31,13 @@ class Dataset:
         batch_size:int      current batch size - defaults to len(dataset)
     """
 
-    def __init__(self,
-                 name: str,
-                 root: str,
-                 train: bool = False,
-                 batch_size: int = 0,
-                 device: str = "cpu",
-                 dtype: torch.dtype = torch.float32,
-                 start: int = 0,
-                 end: int = 0):
+    def __init__(self, name: str, root: str, train: bool = False, batch_size: int = 0,
+                 device: str = "cpu", dtype: torch.dtype = torch.float32,
+                 start: int = 0, end: int = 0):
         try:
             ds = getattr(torchvision.datasets, name)(root=root, train=train, download=True)
         except AttributeError as err:
-            print(f"Error: invalid dataset {name} - {err}")
-            sys.exit(1)
+            raise InvalidConfigError(f"invalid dataset {name} - {err}")
         if len(ds.data) != len(ds.targets):
             raise ValueError("expect same number of images and labels")
         if end == 0:
@@ -75,10 +69,10 @@ class Dataset:
         return self.data.size()[1]
 
     @property
-    def image_shape(self) -> tuple[int, int]:
+    def image_shape(self) -> tuple[int, int, int]:
         """Shape of each image"""
         size = self.data.size()
-        return (size[2], size[3])
+        return size[1], size[2], size[3]
 
     def to(self, device="cpu") -> "Dataset":
         """Move tensors to given device and return a new copy of the dataset"""
@@ -152,16 +146,17 @@ class Dataset:
             self.indexes = ix
         return self
 
-    def filter(self, predict: Tensor, target_class: int | None = None, errors_only: bool = False) -> "Dataset":
+    def filter(self, predict: Tensor, target_class: int = -1, errors_only: bool = False) -> "Dataset":
         """Apply filtering by class and/or errors"""
+        log.debug(f"filter images: errors_only={errors_only} class={target_class}")
         ix = None
         if errors_only:
-            if target_class is None:
-                ix = (self.targets != predict).nonzero(as_tuple=True)[0]
-            else:
+            if target_class >= 0:
                 tgts = torch.where(self.targets != predict, self.targets, -1)
                 ix = (tgts == target_class).nonzero(as_tuple=True)[0]
-        elif target_class is not None:
+            else:
+                ix = (self.targets != predict).nonzero(as_tuple=True)[0]
+        elif target_class >= 0:
             ix = (self.targets == target_class).nonzero(as_tuple=True)[0]
         self.indexes = ix
         return self
@@ -182,7 +177,6 @@ class DatasetIterator:
         raise StopIteration
 
 
-# utils
 def to_tensor(data, device, dtype) -> Tensor:
     if isinstance(data, np.ndarray):
         if data.ndim == 4:

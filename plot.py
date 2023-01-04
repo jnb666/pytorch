@@ -1,40 +1,36 @@
 #!/usr/bin/env python
+# simple plot gui which reads latest data from local disk
 import argparse
 import logging as log
 import sys
-import time
+from os import path
 
 import ml
-import numpy as np
-import torch
-from torch import nn
-
-
-def getargs():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--datadir", default="./data", help="data directory root")
-    parser.add_argument("--rundir", default="./runs", help="saved run directory root")
-    parser.add_argument("--seed", type=int, default=1, help="random seed (default: 1)")
-    parser.add_argument("--version", default="1", help="config version (default 1)")
-    parser.add_argument("--debug", action="store_true", default=False, help="debug printing")
-    parser.add_argument("config")
-    return parser.parse_args()
 
 
 def main():
-    args = getargs()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--datadir", default="./data", help="data directory root")
+    parser.add_argument("--rundir", default="./runs", help="saved run directory root")
+    parser.add_argument("--cpu", action="store_true", default=False, help="disable CUDA for evaluation")
+    parser.add_argument("--debug", action="store_true", default=False, help="debug printing")
+    parser.add_argument("config")
+    args = parser.parse_args()
+
     ml.init_logger(debug=args.debug)
+    device = ml.get_device(args.cpu)
 
-    cfg = ml.Config(args.config, args.rundir)
-    log.debug(cfg)
-
-    test_data = cfg.dataset(args.datadir, "test")
-    transform = cfg.transforms()
-    model = cfg.model()
+    loader = ml.FileLoader(
+        cfgdir=path.dirname(args.config),
+        rundir=args.rundir,
+        datadir=args.datadir,
+        device=device
+    )
+    name = path.basename(args.config).removesuffix(".toml")
 
     app = ml.init_gui()
-    win = ml.MainWindow(cfg, model, test_data, transform)
-    win.update_stats()
+    win = ml.MainWindow(loader, model=name)
+    win.load(running=False)
     win.show()
     sys.exit(app.exec())
 

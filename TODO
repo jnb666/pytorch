@@ -1,18 +1,40 @@
 TODO
 ====
-- service + RPC interface using ZMQ:
-   commands to server - all return status: [client REQ and server REP] 
-        [ "load", "config.toml" ]       stop training, load model and data and init weights and optimizer
-        [ "restart" ]                   stop training, reset random seed and init weights and optimizer
-        [ "resume", n ]                 stop training, load rng state, model weights and optimizer state from checkpoint
-        [ "max_epoch", n ]              set max epoch limit
-        [ "pause", flag ]               pause (flag=true) or resume (flag=false) run
-        [ "shutdown" ]                  stops training and shut down server
-    responses from server:
-        [ "status", code, cmd, err ]    code = "ok" or "error", cmd = source command,  err = error message detail or ""xw
-    [server PUB and client SUB]
-        [ "epoch",  n ]                 sent to indicate epoch n has been saved
+- add clear flag to clear out old checkpoints
+
+- move img menu to bottom
+
+- check repeatable runs
 
 - CPU and memory profiling
 
 - hyperparameter tuning?
+
+- redis DB schema
+    config         hash{"name": "config TOML", ...}          - all available models - updated on server startup / inotify
+    state          json(State)                               - current model, epoch, epochs and run state
+    stats          string(saved(stats.state_dict()))         - training stats - updated on load and after each epoch
+    activations    hash{"layer:index": saved(Tensor)}        - activations for given layer and entry from test dataset
+    histograms     hash("layer": saved(y:Tensor, x:Tensor))  - histogram of activations for first batch of test dataset
+
+- service + RPC interface using ZMQ:
+   commands to server - all return status: [client REQ and server REP] 
+        [ "load", "file.toml" ]                 stop training, load model and stats from last run
+        [ "start", epoch, clear ]               stop training, init weights and optimizer if epoch=0 else load from checkpoint
+                                                clear old checkpoints if clear flag is set
+        [ "max_epoch", n ]                      set max epoch limit
+        [ "pause", on ]                         pause (on=true) or resume (flag=false) run
+        [ "activations", [layers...], index ]   load activations for element index from training set
+        [ "histograms", [layers...] ]           load histograms for first batch of training set data
+
+    after each epoch:
+        - update stats
+        - delete activations and histograms
+        - update state
+
+    responses from server:
+        { code="ok|error", err="error string"}
+
+
+
+
