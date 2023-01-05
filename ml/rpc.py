@@ -96,22 +96,21 @@ class Database:
         models.sort()
         return models
 
-    def set_model(self, name: str, dir: str, trainer: Trainer | None, device: str = "cpu") -> Stats:
+    def set_model(self, name: str, dir: str, max_epoch: int) -> Stats:
         """Set current model and load epochs and stats from filesystem"""
         log.debug(f"set_model: name={name} dir={dir}")
-        state = State(name=name)
+        state = State(name=name, max_epoch=max_epoch)
         file = path.join(dir, "model.pt")
         stats = Stats()
         try:
-            checkpoint = torch.load(file, map_location=device)
+            checkpoint = torch.load(file, map_location="cpu")
             stats.load_state_dict(checkpoint["stats_state_dict"])
-            stats.running = False
-            state.epoch = stats.current_epoch
-            log.debug(f"set_model: loaded checkpoint from {file} - epoch={state.epoch}")
-            if trainer:
-                trainer.model.load_state_dict(checkpoint["model_state_dict"])
+            log.debug(f"set_model: loaded stats from {file} - epoch={stats.current_epoch}")
         except FileNotFoundError:
             pass
+        stats.xrange = [0, max_epoch]
+        stats.running = False
+        state.epoch = stats.current_epoch
         for file in glob(path.join(dir, "model_*.pt")):
             filename = path.basename(file)
             state.epochs.append(int(filename[6:-3]))
@@ -216,6 +215,7 @@ class BaseContext:
         self.device = device
         self.trainer: Trainer | None = None
         self.ds: Datasets | None = None
+        self.cfg: Config | None = None
         self.stats = Stats()
         self.epochs: list[int] = []
 
@@ -233,27 +233,30 @@ class BaseContext:
         set_logdir(cfg.dir)
         log.debug(cfg)
         dtype = torch.float16 if cfg.half else torch.float32
+        self.cfg = cfg
         self.ds = Datasets(cfg, self.args.datadir, device=self.device, dtype=dtype)
-        model = Model(cfg, device=self.device)
-        log.debug(f"== {cfg.name} model: ==\n{model}")
-        self.trainer = Trainer(cfg, model)
 
     def restart(self, clear_files: bool = False) -> bool:
-        if not self.trainer or not self.ds:
+        if not self.cfg or not self.ds:
             return False
-        set_seed(self.trainer.cfg.seed)
-        self.trainer = Trainer(self.trainer.cfg, self.trainer.model)
-        self.trainer.model.init_weights(self.ds.train_data.image_shape)
-        self.trainer.cfg.save(clear=clear_files)
+        self.cfg.save(clear=clear_files)
+        set_seed(self.cfg.seed)
+        model = Model(self.cfg, device=self.device)
+        model.init_weights(self.ds.train_data.image_shape)
+        self.trainer = Trainer(self.cfg, model)
         self.stats = Stats()
         self.stats.xrange = [1, self.trainer.epochs]
         return True
 
     def resume(self, epoch: int) -> bool:
-        if not self.trainer or not self.ds:
+        if not self.cfg or not self.ds:
             return False
-        self.trainer.cfg.save()
+        self.cfg.save()
+        model = Model(self.cfg, device=self.device)
+        self.trainer = Trainer(self.cfg, model)
         self.stats = self.trainer.resume_from(epoch, self.device)
+        if self.stats.current_epoch != epoch:
+            return False
         if self.trainer.stopper:
             self.trainer.stopper.update_stats(self.stats)
         return True
@@ -360,7 +363,7 @@ class Server(BaseContext):
             data = self.db.get_config(name)
             cfg = Config(name=name, data=data, rundir=self.args.rundir, seed=self.args.seed)
             self.load_config(cfg)
-            self.stats = self.db.set_model(name, cfg.dir, self.trainer, device=self.device)
+            self.stats = self.db.set_model(name, cfg.dir, cfg.epochs)
             self.ok()
         except InvalidConfigError as err:
             self.error(f"config '{name}': {err}")
@@ -377,7 +380,7 @@ class Server(BaseContext):
         except FileNotFoundError as err:
             self.error(f"error loading checkpoint: {err}")
             return
-        if self.started and self.trainer:
+        if self.started:
             self.stats.running = True
             self.db.update(self.stats, clear=True)
             self.ok()
@@ -387,8 +390,8 @@ class Server(BaseContext):
 
     def set_max_epoch(self, epoch: int) -> None:
         log.info(f"cmd: max_epoch {epoch}")
-        if self.trainer:
-            self.trainer.epochs = epoch
+        if self.cfg:
+            self.cfg.epochs = epoch
             self.stats.xrange = [0, epoch]
             self.db.update(self.stats)
             self.ok()
@@ -407,26 +410,40 @@ class Server(BaseContext):
             state = self.db.get_state()
             self.start(state.epoch, False)
 
+    def get_model(self) -> Model | None:
+        if self.started and self.trainer:
+            return self.trainer.model
+        if not self.cfg or self.stats.current_epoch < 1:
+            return None
+        model = Model(self.cfg, device=self.device)
+        trainer = Trainer(self.cfg, model)
+        stats = trainer.resume_from(self.stats.current_epoch, self.device)
+        if stats.current_epoch == self.stats.current_epoch:
+            return model
+        return None
+
     def get_activations(self, layers: list[int], index: int) -> None:
         log.debug(f"cmd: activations {layers} {index}")
-        if not self.trainer or not self.ds:
+        model = self.get_model()
+        if not self.ds or not model:
             self.error("config not loaded")
             return
         test_data = self.ds.test_data
-        input = test_data.data[index]
-        activations = self.trainer.model.activations(input.view((1,)+input.size()), layers)
+        input = test_data.data[index:index+1]
+        activations = model.activations(input, layers)
         for layer in layers:
             self.db.save(activations[layer], "ml:activations", f"{layer}:{index}")
         self.ok()
 
     def get_histograms(self, layers: list[int]) -> None:
         log.debug(f"cmd: histograms {layers}")
-        if not self.trainer or not self.ds:
+        model = self.get_model()
+        if not self.ds or not model:
             self.error("config not loaded")
             return
         test_data = self.ds.test_data
         input = test_data.data[:test_data.batch_size]
-        histograms = self.trainer.model.activations(input, layers, hist_bins=100)
+        histograms = model.activations(input, layers, hist_bins=100)
         for layer in layers:
             self.db.save(histograms[layer], "ml:histograms", str(layer))
         self.ok()

@@ -1,8 +1,8 @@
 TODO
 ====
-- save gui selections to file and restore when model is loaded
+- scheduler - add torch.optim.lr_scheduler.ReduceLROnPlateau
 
-- move img menu to bottom
+- resnet example - implement resnet block
 
 - check repeatable runs
 

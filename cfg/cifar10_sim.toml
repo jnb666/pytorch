@@ -1,9 +1,9 @@
-half=true
+half = true
 
 [train_data]
 dataset = "CIFAR10"
 train = true
-batch_size = 125
+batch_size = 128
 normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 
 [test_data]
@@ -69,13 +69,13 @@ Conv2d = ["xavier_uniform"]
 
 [transform]
 transforms = [
-  ["RandomHorizontalFlip", {p=0.5} ],
-  ["RandomAffine", {p=0.5, degrees=0, translate=[0.15,0.15], padding_mode="reflection"} ],
+  ["RandomHorizontalFlip", { p=0.5} ],
+  ["RandomCrop", { p=0.5, size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
 ]
 
 [train]
 optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=2e-5} ]
-scheduler = ["StepLR", {step_size=25, gamma=0.4} ]
+scheduler = ["StepLR", {step_size=25, gamma=0.5} ]
 stop = {epochs=3, extra=5, avg=20}
-epochs = 125
+epochs = 150
 shuffle = true

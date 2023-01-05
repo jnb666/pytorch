@@ -44,8 +44,8 @@ Conv2d = ["xavier_uniform"]
 
 [transform]
 transforms = [
-  ["RandomHorizontalFlip", {p=0.5} ],
-  ["RandomAffine", {p=0.5, degrees=0, translate=[0.15,0.15], padding_mode="reflection"} ],
+  ["RandomHorizontalFlip"],
+  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
 ]
 
 [train]

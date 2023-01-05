@@ -116,7 +116,7 @@ class Stopper:
             return False
 
         stats.valid_accuracy_avg.append(mean(stats.valid_accuracy, len(stats.valid_accuracy)-1, self.avg))
-        if len(stats.valid_accuracy_avg) < self.epochs + 1:
+        if len(stats.valid_accuracy_avg) < max(self.avg, self.epochs + 1):
             return False
 
         if self.stopping >= 0:
@@ -188,7 +188,6 @@ class Trainer:
     def __init__(self, cfg: Config, model: Model, loss_fn=None):
         self.cfg = cfg
         self.dir = cfg.dir
-        self.epochs = cfg.epochs
         self.shuffle = cfg.train.get("shuffle", False)
         self.log_every = int(cfg.train.get("log_every", 1))
         self.model = model
@@ -203,6 +202,10 @@ class Trainer:
         stop_cfg = self.cfg.train.get("stop")
         self.stopper = Stopper(**stop_cfg) if stop_cfg else None
         log.info(f"== Trainer: ==\n{self}")
+
+    @property
+    def epochs(self):
+        return self.cfg.epochs
 
     def __str__(self) -> str:
         return pformat(self.cfg.train)
@@ -244,12 +247,16 @@ class Trainer:
         stats.current_epoch = epoch
         stats.xrange[1] = max(stats.xrange[1], self.epochs)
 
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if self.scheduler:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        if self.cfg.half:
-            self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        try:
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if self.scheduler:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            if self.cfg.half:
+                self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        except RuntimeError as err:
+            log.error(f"error loading trainer state from {file}: {err}")
+            stats.current_epoch = 0
 
         if hasattr(checkpoint, "torch_rng_state"):
             torch.set_rng_state(checkpoint["torch_rng_state"].to("cpu"))
@@ -262,18 +269,14 @@ class Trainer:
     def train(self, train_data: Dataset, transform: nn.Module | None = None, half: bool = False,
               should_stop: Callable[[], bool] | None = None) -> float:
         """Train one epoch against training dataset - returns training loss"""
-        self.model.train()
         if self.shuffle:
             train_data.shuffle()
-        train_loss = 0
+        train_loss = 0.0
         for i, (data, targets) in enumerate(train_data):
-            if should_stop and should_stop():
-                raise RunInterrupted()
             if transform is not None and (self.stopper is None or self.stopper.stopping < 0):
-                if i == 0:
-                    log.debug("apply transform")
                 with torch.no_grad():
                     data = transform(data)
+            self.model.train()
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                 pred = self.model(data)
                 loss = self.loss_fn(pred, targets)
@@ -281,7 +284,9 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()
-            train_loss += loss.item() / len(train_data)
+            train_loss += float(loss) / len(train_data)
+            if should_stop and should_stop():
+                raise RunInterrupted()
         if self.scheduler:
             self.scheduler.step()
         return train_loss
@@ -291,22 +296,22 @@ class Trainer:
         self.model.eval()
         if len(self.predict) != test_data.nitems:
             self.predict = torch.zeros((test_data.nitems), dtype=torch.int64)
-        test_loss = 0
+        test_loss = 0.0
         total_correct = 0
         samples = 0
         with torch.no_grad():
             for data, targets in test_data:
-                if should_stop and should_stop():
-                    raise RunInterrupted()
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                     pred = self.model(data)
                     loss = self.loss_fn(pred, targets).item()
                 outputs = pred.argmax(1)
                 correct = int((outputs == targets).type(torch.float).sum())
                 self.predict[samples: samples+len(targets)] = outputs
-                test_loss += loss / len(test_data)
+                test_loss += float(loss) / len(test_data)
                 total_correct += correct
                 samples += len(targets)
+                if should_stop and should_stop():
+                    raise RunInterrupted()
         return test_loss, total_correct/samples
 
     def should_stop(self, stats: Stats) -> bool:

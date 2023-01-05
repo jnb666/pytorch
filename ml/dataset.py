@@ -45,11 +45,12 @@ class Dataset:
         self.data = to_tensor(ds.data, device, dtype)[start:end]
         self.targets = to_tensor(ds.targets, device, torch.int64)[start:end]
         self.indexes: Tensor | None = None
-        self.classes: list[str] = []
-        if len(ds.classes) > 0 and ds.classes[0][0].isalpha():
-            self.classes = ds.classes
-        else:
+        if name == "MNIST":
             self.classes = [str(i) for i in range(len(ds.classes))]
+        elif name == "CIFAR10":
+            self.classes = ["plane", "car", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck"]
+        else:
+            self.classes = ds.classes
         if batch_size > 0:
             self.batch_size = batch_size
         else:

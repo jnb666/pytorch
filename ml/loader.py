@@ -124,7 +124,7 @@ class DBLoader(Loader):
             res[layer] = self.db.load("ml:activations", f"{layer}:{index}", device=self.device)
         return res
 
-    def get_histograms(self, layers: list[int]) -> dict[int, tuple[Tensor, Tensor]]:
+    def get_histograms(self, layers: list[int]) -> dict[int, Any]:
         missing = self.db.check_exists("ml:histograms", [f"{i}" for i in layers])
         if missing:
             self.send("histograms", missing)

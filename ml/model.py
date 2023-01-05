@@ -82,10 +82,11 @@ class Model(nn.Sequential):
 
         def add(i, x):
             if hist_bins:
-                data = x.to(device="cpu", dtype=torch.float32).flatten()
-                height, xpos = torch.histogram(data, hist_bins)
-                log.debug(f"model histogram: layer={i} range={xpos[0]:.2f}:{xpos[-1]:.2f}")
-                res[i] = height, xpos
+                vals = x.to(dtype=torch.float32).flatten()
+                x0, x1 = torch.min(vals).item(), torch.max(vals).item()
+                hist = torch.histc(vals, hist_bins, x0, x1)
+                log.debug(f"model histogram: layer={i} range={x0:.2f}:{x1:.2f}")
+                res[i] = hist.cpu(), x0, x1
             else:
                 log.debug(f"model activations: layer={i} shape={list(x.shape)}")
                 res[i] = x.cpu()
