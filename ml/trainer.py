@@ -254,7 +254,7 @@ class Trainer:
                 self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             if self.cfg.half:
                 self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
-        except RuntimeError as err:
+        except (RuntimeError, KeyError) as err:
             log.error(f"error loading trainer state from {file}: {err}")
             stats.current_epoch = 0
 

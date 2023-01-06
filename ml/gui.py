@@ -197,6 +197,7 @@ class MainWindow(qw.QWidget):
         self.data.reset()
         self.img_menu.update_config(self.cfg)
         self.cmd_menu.update_config(self.cfg, self.stats, self.loader.get_models())
+        self.update_stats()
 
     def update_stats(self) -> None:
         """Refresh GUI with updated stats and model weights"""
@@ -302,7 +303,6 @@ class CommandMenu(qw.QWidget):
         if self.send:
             self._update_epoch_list(stats.current_epoch)
             self.max_epoch.setText(str(cfg.epochs))
-        self.update_stats(stats)
 
     def update_stats(self, stats: Stats) -> None:
         """Called after loading config and after each epoch"""

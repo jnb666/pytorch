@@ -31,8 +31,8 @@ def subscribe(win: ml.MainWindow, db: ml.Database) -> None:
             if s.name != state.name or s.models != state.models or s.checksum != state.checksum:
                 log.info(f"update config: {s.name} running={s.running}")
                 win.update_config(s.name, s.running)
-            if (s.name != state.name or s.epoch != state.epoch or s.running != state.running or
-                    s.max_epoch != state.max_epoch or (not s.running and s.epochs != state.epochs)):
+            elif (s.epoch != state.epoch or s.running != state.running or s.max_epoch != state.max_epoch
+                  or (not s.running and s.epochs != state.epochs)):
                 log.info(f"update stats: {s.name} epoch={s.epoch}/{s.max_epoch} running={s.running}")
                 win.update_stats()
             state.update(s)
