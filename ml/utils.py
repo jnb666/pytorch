@@ -79,12 +79,12 @@ def get_definition(pkg, defn, vars, expand=None):
     layers = []
     for args in defn:
         log.debug(f"add layer: {args} vars={vars}")
-        layer = get_module(pkg, args, vars, expand)
+        layer = get_module(pkg, args, vars, expand, desc="model")
         layers.append(layer)
     return layers
 
 
-def get_module(pkg, args, vars=None, expand=None):
+def get_module(pkg, args, vars=None, expand=None, desc=""):
     args = list(args).copy()
     if expand:
         args[0] = expand(args[0])
@@ -97,8 +97,8 @@ def get_module(pkg, args, vars=None, expand=None):
         kwargs[name] = getarg(arg, vars)
     try:
         fn = getattr(pkg, args[0])(*args[1:], **kwargs)
-    except AttributeError as err:
-        raise InvalidConfigError(f"invalid function {args} {kwargs} - {err}")
+    except (AttributeError, TypeError) as err:
+        raise InvalidConfigError(f"{desc}: {err}")
     return fn
 
 
@@ -115,5 +115,5 @@ def _arg(arg, vars):
         try:
             return vars[arg[1:]]
         except KeyError:
-            raise InvalidConfigError(f"variable not defined in config: {arg}")
+            raise InvalidConfigError(f"{arg} not defined")
     return arg

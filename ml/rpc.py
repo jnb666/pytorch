@@ -19,8 +19,7 @@ from torch import nn
 from .config import Config
 from .model import Model
 from .trainer import Datasets, Stats, Trainer
-from .utils import (InvalidConfigError, RunInterrupted, get_device, set_logdir,
-                    set_seed)
+from .utils import InvalidConfigError, RunInterrupted, set_logdir, set_seed
 
 zmq_port = 5555
 redis_port = 6379
@@ -35,6 +34,7 @@ class State:
     running: bool = False
     models: list[str] = field(default_factory=list)
     checksum: str = ""
+    error: str = ""
 
     def dump(self) -> str:
         return json.dumps(self.__dict__)
@@ -132,6 +132,7 @@ class Database:
                 m = hashlib.sha256()
                 m.update(data)
                 state.checksum = m.hexdigest()
+        # log.debug(f"set_model_state => {state}")
         self.db.set("ml:state", state.dump())
         return state
 
@@ -150,6 +151,7 @@ class Database:
         self.save(stats_dict, "ml:stats")
         state = self.get_state()
         state.running = running
+        # log.debug(f"set_running => {state}")
         self.db.set("ml:state", state.dump())
 
     def update(self, stats: Stats, clear: bool = False, epochs: list[int] | None = None) -> None:
@@ -169,6 +171,7 @@ class Database:
         if clear:
             self.db.delete("ml:activations")
             self.db.delete("ml:histograms")
+        # log.debug(f"update => {state}")
         self.db.set("ml:state", state.dump())
 
     def save(self, object: Any, name: str, key: str = "") -> None:
@@ -232,9 +235,10 @@ class BaseContext:
     def load_config(self, cfg: Config) -> None:
         set_logdir(cfg.dir)
         log.debug(cfg)
+        device = "cuda" if self.device == "cuda" else "cpu"
         dtype = torch.float16 if cfg.half else torch.float32
         self.cfg = cfg
-        self.ds = Datasets(cfg, self.args.datadir, device=self.device, dtype=dtype)
+        self.ds = Datasets(cfg, self.args.datadir, device=device, dtype=dtype)
 
     def restart(self, clear_files: bool = False) -> bool:
         if not self.cfg or not self.ds:
@@ -243,7 +247,7 @@ class BaseContext:
         set_seed(self.cfg.seed)
         model = Model(self.cfg, device=self.device)
         model.init_weights(self.ds.train_data.image_shape)
-        self.trainer = Trainer(self.cfg, model)
+        self.trainer = Trainer(self.cfg, model, device=self.device)
         self.stats = Stats()
         self.stats.xrange = [1, self.trainer.epochs]
         return True
@@ -253,8 +257,8 @@ class BaseContext:
             return False
         self.cfg.save()
         model = Model(self.cfg, device=self.device)
-        self.trainer = Trainer(self.cfg, model)
-        self.stats = self.trainer.resume_from(epoch, self.device)
+        self.trainer = Trainer(self.cfg, model, device=self.device)
+        self.stats = self.trainer.resume_from(epoch)
         if self.stats.current_epoch != epoch:
             return False
         if self.trainer.stopper:
@@ -283,6 +287,8 @@ class BaseContext:
                           test_accuracy, valid_loss, valid_accuracy)
         stop = self.trainer.should_stop(self.stats)
         self.stats.running = not stop
+
+        self.trainer.step(self.stats)
 
         if stop or (self.epoch % self.log_every == 0):
             self.trainer.save(self.stats)
@@ -366,7 +372,9 @@ class Server(BaseContext):
             self.stats = self.db.set_model(name, cfg.dir, cfg.epochs)
             self.ok()
         except InvalidConfigError as err:
-            self.error(f"config '{name}': {err}")
+            state = State(name=name, error=str(err))
+            self.db.set_model_state(state)
+            self.error(str(err))
         self.started = False
         self.paused = True
 
@@ -377,8 +385,8 @@ class Server(BaseContext):
                 self.started = self.restart(clear)
             else:
                 self.started = self.resume(epoch)
-        except FileNotFoundError as err:
-            self.error(f"error loading checkpoint: {err}")
+        except (FileNotFoundError, InvalidConfigError) as err:
+            self.error(str(err))
             return
         if self.started:
             self.stats.running = True
@@ -416,8 +424,8 @@ class Server(BaseContext):
         if not self.cfg or self.stats.current_epoch < 1:
             return None
         model = Model(self.cfg, device=self.device)
-        trainer = Trainer(self.cfg, model)
-        stats = trainer.resume_from(self.stats.current_epoch, self.device)
+        trainer = Trainer(self.cfg, model, device=self.device)
+        stats = trainer.resume_from(self.stats.current_epoch)
         if stats.current_epoch == self.stats.current_epoch:
             return model
         return None

@@ -37,7 +37,7 @@ class Dataset:
         try:
             ds = getattr(torchvision.datasets, name)(root=root, train=train, download=True)
         except AttributeError as err:
-            raise InvalidConfigError(f"invalid dataset {name} - {err}")
+            raise InvalidConfigError(f"invalid dataset: {err}")
         if len(ds.data) != len(ds.targets):
             raise ValueError("expect same number of images and labels")
         if end == 0:

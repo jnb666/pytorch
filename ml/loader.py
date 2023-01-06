@@ -33,6 +33,9 @@ class Loader:
     def get_epochs(self) -> list[int]:
         raise NotImplementedError("abstract method")
 
+    def load_model(self, name: str) -> str:
+        raise NotImplementedError("abstract method")
+
     def load_config(self, name: str) -> tuple[Config, Dataset, nn.Module | None]:
         raise NotImplementedError("abstract method")
 
@@ -60,6 +63,15 @@ class FileLoader(Loader):
         names = [path.basename(f).removesuffix(".toml") for f in glob(path.join(self.cfgdir, "*.toml"))]
         names.sort()
         return names
+
+    def load_model(self, name: str) -> str:
+        file = path.join(self.cfgdir, name + ".toml")
+        try:
+            with open(file) as f:
+                data = f.read()
+        except FileNotFoundError as err:
+            raise InvalidConfigError(f"file not found: {err}")
+        return data
 
     def load_config(self, name: str) -> tuple[Config, Dataset, nn.Module | None]:
         file = path.join(self.cfgdir, name + ".toml")
@@ -106,7 +118,11 @@ class DBLoader(Loader):
     def get_epochs(self) -> list[int]:
         return self.db.get_state().epochs
 
+    def load_model(self, name: str) -> str:
+        return self.db.get_config(name)
+
     def load_config(self, name: str) -> tuple[Config, Dataset, nn.Module | None]:
+        log.debug(f"DBloader: load_config {name}")
         cfg = Config(name=name, data=self.db.get_config(name), rundir=self.rundir)
         test_data = cfg.dataset(self.datadir, "test", device=self.device)
         transform = cfg.transforms()

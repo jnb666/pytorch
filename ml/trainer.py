@@ -172,11 +172,13 @@ class Trainer:
         cfg:dict             settings from config [train] section
         model:Model          pytorch neural network model
         loss_fn              loss function - defaults ti nn.CrossEntropyLoss
+        device               device to use for training and test runs ("cpu" | "cuda" | "mps")
 
     Attributes:
         model:nn.Module      pytorch network model
         optimizer            torch.optim.Optimizer
         scheduler            torch.optim.lr_scheduler (optional)
+        metric               optional scheduler metric [used by ReduceLROnPlateau]
         epochs:int           number of epochs to train for
         shuffle:bool         flag set if data is to be shuffled at start of each epoch
         log_every:int        frequency to log stats to stdout
@@ -185,9 +187,10 @@ class Trainer:
         stopper:Stopper      optional object to check if should stop after this epoch
     """
 
-    def __init__(self, cfg: Config, model: Model, loss_fn=None):
+    def __init__(self, cfg: Config, model: Model, loss_fn=None, device: str = "cpu"):
         self.cfg = cfg
         self.dir = cfg.dir
+        self.device = device
         self.shuffle = cfg.train.get("shuffle", False)
         self.log_every = int(cfg.train.get("log_every", 1))
         self.model = model
@@ -197,10 +200,13 @@ class Trainer:
             self.loss_fn = loss_fn
         self.predict = torch.tensor([], dtype=torch.int64)
         self.optimizer = cfg.optimizer(self.model)
-        self.scheduler = cfg.scheduler(self.optimizer)
+        self.scheduler, self.metric = cfg.scheduler(self.optimizer)
         self.scaler = torch.cuda.amp.GradScaler(enabled=cfg.half)
         stop_cfg = self.cfg.train.get("stop")
-        self.stopper = Stopper(**stop_cfg) if stop_cfg else None
+        try:
+            self.stopper = Stopper(**stop_cfg) if stop_cfg else None
+        except TypeError as err:
+            raise InvalidConfigError(f"stop: {err}")
         log.info(f"== Trainer: ==\n{self}")
 
     @property
@@ -235,12 +241,12 @@ class Trainer:
         torch.save(checkpoint, file)
         link(file, path.join(self.dir, "model.pt"))
 
-    def resume_from(self, epoch: int, device: str = "cpu") -> Stats:
+    def resume_from(self, epoch: int) -> Stats:
         """Load saved stats, weights and random state from checkpoint file"""
         log.info(f"resume from epoch {epoch}")
         file = path.join(self.dir, f"model_{epoch}.pt")
-        log.debug(f"load checkpoint from {file} map_location={device}")
-        checkpoint = torch.load(file, map_location=device)
+        log.debug(f"load checkpoint from {file} map_location={self.device}")
+        checkpoint = torch.load(file, map_location=self.device)
 
         stats = Stats()
         stats.load_state_dict(checkpoint["stats_state_dict"])
@@ -277,6 +283,7 @@ class Trainer:
                 with torch.no_grad():
                     data = transform(data)
             self.model.train()
+            data, targets = data.to(self.device), targets.to(self.device)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                 pred = self.model(data)
                 loss = self.loss_fn(pred, targets)
@@ -287,8 +294,6 @@ class Trainer:
             train_loss += float(loss) / len(train_data)
             if should_stop and should_stop():
                 raise RunInterrupted()
-        if self.scheduler:
-            self.scheduler.step()
         return train_loss
 
     def test(self, test_data: Dataset, should_stop: Callable[[], bool] | None = None) -> tuple[float, float]:
@@ -301,6 +306,7 @@ class Trainer:
         samples = 0
         with torch.no_grad():
             for data, targets in test_data:
+                data, targets = data.to(self.device), targets.to(self.device)
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                     pred = self.model(data)
                     loss = self.loss_fn(pred, targets).item()
@@ -313,6 +319,14 @@ class Trainer:
                 if should_stop and should_stop():
                     raise RunInterrupted()
         return test_loss, total_correct/samples
+
+    def step(self, stats: Stats) -> None:
+        """If scheduler is defined then call it's step function"""
+        if self.scheduler:
+            if self.metric:
+                self.scheduler.step(getattr(stats, self.metric)[-1])
+            else:
+                self.scheduler.step()
 
     def should_stop(self, stats: Stats) -> bool:
         """Returns True if hit stopping condition"""

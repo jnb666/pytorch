@@ -44,7 +44,7 @@ class Model(nn.Sequential):
                     self.append(layer.to(device))
             else:
                 log.debug(f"add layer: {args}")
-                layer = get_module(torch.nn, args, expand=expand_name)
+                layer = get_module(torch.nn, args, expand=expand_name, desc="model")
                 self.append(layer.to(device))
 
     def init_weights(self, input_shape: tuple[int, int, int]) -> None:
@@ -58,8 +58,8 @@ class Model(nn.Sequential):
             for i, layer in enumerate(self):
                 try:
                     x = layer(x)
-                except RuntimeError as err:
-                    raise InvalidConfigError(f"error in layer {i}: {layer} definition\n  {err}")
+                except (RuntimeError, TypeError) as err:
+                    raise InvalidConfigError(f"layer {i}: {err}")
                 name = get_name(layer)
                 nparams = num_params(layer)
                 params = f"params={nparams}" if nparams else ""
@@ -113,14 +113,14 @@ def init_layer_weights(typ: str, layer: nn.Module, params: dict[str, Any]) -> st
     # first try exact then substring match
     for layer_type, args in params.items():
         if layer_type == name:
-            return set_weights(weights, args.copy())
+            return set_weights(typ, weights, args.copy())
     for layer_type, args in params.items():
         if layer_type in name:
-            return set_weights(weights, args.copy())
+            return set_weights(typ, weights, args.copy())
     raise InvalidConfigError(f"missing {typ} init for {name}")
 
 
-def set_weights(weights, args):
+def set_weights(typ, weights, args):
     if len(args) >= 2 and isinstance(args[-1], dict):
         kwargs = args.pop()
     else:
@@ -128,7 +128,7 @@ def set_weights(weights, args):
     try:
         fn = getattr(torch.nn.init, args[0]+"_")
     except AttributeError as err:
-        raise InvalidConfigError(f"invalid init function {args} {kwargs} - {err}")
+        raise InvalidConfigError(f"invalid {typ} init: {err}")
     fn(weights, *args[1:], **kwargs)
     plist = (",".join([str(x) for x in args[1:]]) +
              ",".join([f"{k}={v}" for k, v in kwargs.items()]))

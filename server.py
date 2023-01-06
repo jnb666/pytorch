@@ -20,11 +20,13 @@ def watch_config(dir: str):
     state = db.get_state()
     while True:
         for event in inotify.read():
+            log.debug(f"inotify: {event.name}")
             s = db.update_config(path.join(dir, event.name))
-            log.debug(f"inotify: {s}")
             # reload config if changed on disk and run is not in progress
             if s.name == state.name and not s.running and s.checksum != state.checksum:
-                client.send("load", s.name)
+                status, err = client.send("load", s.name)
+                if status == "error":
+                    s.error = err
             state.update(s)
 
 

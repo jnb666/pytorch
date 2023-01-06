@@ -132,7 +132,10 @@ class Config():
         try:
             args = cfg["normalize"]
             log.debug(f"normalize: {args}")
-            ds.data = F.normalize(ds.data, args[0], args[1], inplace=True)
+            try:
+                ds.data = F.normalize(ds.data, args[0], args[1], inplace=True)
+            except (TypeError, IndexError) as err:
+                raise InvalidConfigError(f"normalize: {err}")
         except KeyError:
             pass
         return ds
@@ -145,7 +148,7 @@ class Config():
             return None
         transform = nn.Sequential()
         for args in config:
-            transform.append(get_module(K.augmentation, args))
+            transform.append(get_module(K.augmentation, args, desc="transform"))
         return transform
 
     def _get_layer_names(self) -> list[str]:
@@ -161,20 +164,31 @@ class Config():
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Create a new optimizer based on config [train] optimizer setting"""
-        typ, kwargs = self.train["optimizer"]
-        optimizer = getattr(torch.optim, typ)
-        return optimizer(model.parameters(), **kwargs)
-
-    def scheduler(self, opt: torch.optim.Optimizer):
         try:
-            typ, kwargs = self.train["scheduler"]
+            typ, kwargs = self.train["optimizer"]
+            cls = getattr(torch.optim, typ)
+            optimizer = cls(model.parameters(), **kwargs)
+        except (AttributeError, KeyError, TypeError) as err:
+            raise InvalidConfigError(f"optimizer: {err}")
+        return optimizer
+
+    def scheduler(self, optimizer: torch.optim.Optimizer) -> tuple[Any, str]:
+        try:
+            arglist = self.train["scheduler"]
         except KeyError:
-            return None
-        if typ == "StepLRandWeightDecay":
-            scheduler = StepLRandWeightDecay
-        else:
-            scheduler = getattr(torch.optim.lr_scheduler, typ)
-        return scheduler(opt, **kwargs)
+            return None, ""
+        try:
+            args = arglist.copy()
+            kwargs = args.pop() if len(args) > 1 and isinstance(args[-1], dict) else {}
+            metric = args[1] if len(args) > 1 else {}
+            if args[0] == "StepLRandWeightDecay":
+                cls = StepLRandWeightDecay
+            else:
+                cls = getattr(torch.optim.lr_scheduler, args[0])
+            scheduler = cls(optimizer, **kwargs)
+        except (AttributeError, KeyError, TypeError) as err:
+            raise InvalidConfigError(f"scheduler: {err}")
+        return scheduler, metric
 
     def __str__(self):
         return pformat(self.cfg)

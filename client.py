@@ -11,13 +11,11 @@ import redis
 import zmq
 from PySide6.QtCore import QTimer
 
-zmq_host = "poppy"
-redis_host = "poppy"
 timeout = 20
 
 
-def subscribe(win: ml.MainWindow, db: ml.Database) -> None:
-    r = ml.Database(redis_host, notify=True)
+def subscribe(win: ml.MainWindow, db: ml.Database, server: str) -> None:
+    r = ml.Database(server, notify=True)
     pubsub = r.db.pubsub()
     log.info("subscribe for redis notifications")
     pubsub.psubscribe("__keyspace@0__:ml:*")
@@ -27,8 +25,11 @@ def subscribe(win: ml.MainWindow, db: ml.Database) -> None:
         msg = pubsub.get_message()
         if msg and msg["channel"].endswith(b"ml:state"):
             s = db.get_state()
-            log.debug(f"notify: {s}")
-            if s.name != state.name or s.models != state.models or s.checksum != state.checksum:
+            # log.debug(f"notify: {s}")
+            if s.error:
+                log.info(f"server error: {s.error}")
+                win.set_error(s.error)
+            elif s.error != state.error or s.name != state.name or s.models != state.models or s.checksum != state.checksum:
                 log.info(f"update config: {s.name} running={s.running}")
                 win.update_config(s.name, s.running)
             elif (s.epoch != state.epoch or s.running != state.running or s.max_epoch != state.max_epoch
@@ -44,6 +45,7 @@ def subscribe(win: ml.MainWindow, db: ml.Database) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--server", default="localhost", help="server for 0MQ and Redis")
     parser.add_argument("--datadir", default="./data", help="data directory root")
     parser.add_argument("--rundir", default="./runs", help="saved run directory root")
     parser.add_argument("--debug", action="store_true", default=False, help="debug printing")
@@ -51,9 +53,9 @@ def main():
 
     ml.init_logger(debug=args.debug)
     device = ml.get_device("cpu")
-    db = ml.Database(redis_host)
+    db = ml.Database(args.server)
     state = db.get_state()
-    client = ml.Client(zmq_host)
+    client = ml.Client(args.server)
 
     loader = ml.DBLoader(
         db=db,
@@ -66,9 +68,9 @@ def main():
     app = ml.init_gui()
     win = ml.MainWindow(loader, client.send, model=state.name)
 
-    subscribe(win, db)
-    if not state.running:
-        client.send("load", state.name)
+    subscribe(win, db, args.server)
+    if not state.running and state.name:
+        status, err = client.send("load", state.name)
 
     win.show()
     sys.exit(app.exec())

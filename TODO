@@ -1,12 +1,8 @@
 TODO
 ====
-- scheduler - add torch.optim.lr_scheduler.ReduceLROnPlateau
-
 - resnet example - implement resnet block
 
 - check repeatable runs
-
-- improve error handling to catch config errors
 
 - CPU and memory profiling
 
