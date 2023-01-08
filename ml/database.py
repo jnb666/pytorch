@@ -11,6 +11,7 @@ from typing import Any
 import redis
 import torch
 
+from .config import Index
 from .trainer import Stats
 from .utils import InvalidConfigError
 
@@ -183,15 +184,21 @@ class Database:
         object = torch.load(io.BytesIO(data), map_location=device)
         return object
 
-    def check_exists(self, name: str, keys: list[str]) -> list[int]:
+    def check_exists(self, name: str, keys: list[str]) -> list[Index]:
         """Get list of hash keys which are not present"""
+        log.debug(f"check_exists: {name} {keys}")
         missing = []
         for key in keys:
             if not self.db.hexists(name, key):
                 try:
                     n = key.index(":")
-                    missing.append(int(key[:n]))
+                    missing.append(key_to_index(key[:n]))
                 except ValueError:
-                    missing.append(int(key))
-        log.debug(f"check_exists: {name} {keys} -> {missing}")
+                    missing.append(key_to_index(key))
+        log.debug(f"missing {missing}")
         return missing
+
+
+def key_to_index(key: str) -> Index:
+    ix = Index([int(s) for s in key.split(".")])
+    return ix

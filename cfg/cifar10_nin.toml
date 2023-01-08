@@ -57,7 +57,7 @@ transforms = [
 
 [train]
 optimizer = ["Adam", {lr=0.002, weight_decay=1e-5} ]
-scheduler = ["ExponentialLR", {gamma=0.95} ]
+scheduler = ["CosineAnnealingLR", {T_max=100} ]
 stop = {epochs=2, extra=4, avg=12}
 epochs = 60
 shuffle = true

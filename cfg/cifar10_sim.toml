@@ -20,18 +20,18 @@ normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 
 [model]
 block1 = [
-  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same", bias=false} ],
+  ["Conv2d", "$nfeat", {kernel_size=3, padding="same", bias=false} ],
   ["BatchNorm2d", {momentum=0.05} ],
   ["ReLU"], 
   ["Dropout", 0.2],
 ]
 
 block2 = [
-  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same", bias=false} ],
+  ["Conv2d", "$nfeat", {kernel_size=3, padding="same", bias=false} ],
   ["BatchNorm2d", {momentum=0.05} ],
-  ["ReLU"], 
+  ["ReLU"],
   ["MaxPool2d", 2 ],
-  ["Dropout", 0.2],
+  ["Dropout", 0.2 ],
 ]
 
 layers = [
@@ -69,13 +69,15 @@ Conv2d = ["xavier_uniform"]
 
 [transform]
 transforms = [
-  ["RandomHorizontalFlip", { p=0.5} ],
-  ["RandomCrop", { p=0.5, size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
+  ["RandomHorizontalFlip" ],
+  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
 ]
 
 [train]
 optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=2e-5} ]
-scheduler = ["StepLR", {step_size=25, gamma=0.5} ]
+scheduler = ["ReduceLROnPlateau", "valid_loss", {factor=0.2, verbose=true} ]
 stop = {epochs=3, extra=5, avg=20}
 epochs = 150
 shuffle = true
+
+

@@ -1,14 +1,15 @@
 import importlib.resources
-import json
 import logging as log
 import math
 import multiprocessing as mp
 import os
+import pickle
 import platform
 import time
 from dataclasses import dataclass, field
 from functools import reduce
 from os import path
+from pprint import pprint
 from typing import Any, Callable
 
 import numpy as np
@@ -21,9 +22,10 @@ from PySide6.QtCore import QRect, QSize, Qt, QTimer, QtMsgType
 from PySide6.QtGui import QColor, QIntValidator
 from torch import Tensor, nn
 
-from .config import Config
+from .config import Config, Index
 from .dataset import Dataset
 from .loader import Loader
+from .model import Model
 from .trainer import Stats
 from .utils import InvalidConfigError, pformat
 
@@ -40,7 +42,7 @@ fgcolor = "w"
 spacing = 15
 margins = 4
 menu_width = 120
-layers_width = 150
+layers_width = 180
 hist_bins = 100
 config_file = path.expanduser("~/.pytorch_gui")
 
@@ -76,23 +78,21 @@ class Options:
     image_errors: dict[str, bool] = field(default_factory=dict)
     image_transformed:  dict[str, bool] = field(default_factory=dict)
     activation_index: dict[str, int] = field(default_factory=dict)
-    activation_layers: dict[str, list[int]] = field(default_factory=dict)
-    histogram_layers: dict[str, list[int]] = field(default_factory=dict)
-
-    def dump(self) -> str:
-        return json.dumps(self.__dict__)
-
-    def load(self) -> "Options":
-        try:
-            with open(config_file, encoding="utf-8") as f:
-                self.__dict__.update(json.load(f))
-        except FileNotFoundError:
-            pass
-        return self
+    activation_layers: dict[str, list[Index]] = field(default_factory=dict)
+    histogram_layers: dict[str, list[Index]] = field(default_factory=dict)
 
     def save(self) -> None:
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(self.__dict__, f)
+        with open(config_file, "wb") as f:
+            pickle.dump(self, f)
+
+
+def get_options() -> Options:
+    try:
+        with open(config_file, "rb") as f:
+            opts = pickle.load(f)
+    except FileNotFoundError:
+        opts = Options()
+    return opts
 
 
 class MainWindow(qw.QWidget):
@@ -118,10 +118,12 @@ class MainWindow(qw.QWidget):
         super().__init__()
         log.debug(f"new MainWindow: model={model}")
         self.cfg: Config | None = None
+        self.model: Model | None = None
         self.data: Dataset | None = None
         self.stats = Stats()
         self.predict = None
-        self.opts = Options().load()
+        self.opts = get_options()
+        # pprint(self.opts)
         self.loader = loader
         self.cfg_menu = ConfigMenu(self, model, sender)
         self.img_menu = ImageMenu(self.opts)
@@ -188,14 +190,14 @@ class MainWindow(qw.QWidget):
         """Load new model definition"""
         log.debug(f"load_config: {name}")
         try:
-            self.cfg, self.data, self.transform = self.loader.load_config(name)
-        except InvalidConfigError as err:
+            self.cfg, self.model, self.data, self.transform = self.loader.load_config(name)
+        except (InvalidConfigError, FileNotFoundError) as err:
             self.set_error(str(err))
             return
         self.setWindowTitle(f"{self.cfg.name} v{self.cfg.version}")
         self.img_menu.set_classes(self.data.classes)
         for page in self.pages:
-            page.update_config(self.cfg)
+            page.update_config(self.cfg, self.model)
         self.data.reset()
         self.img_menu.update_config(self.cfg)
         self.cfg_menu.update_config(self.cfg, self.stats, self.loader.get_models())
@@ -308,7 +310,7 @@ class ConfigMenu(qw.QWidget):
 
     def _select_model(self, index):
         name = self.model_select.itemText(index)
-        QTimer.singleShot(0, self.cmd_menu.model_loader(name))
+        self.cmd_menu.model_loader(name)()
 
 
 class CommandMenu(qw.QWidget):
@@ -406,7 +408,6 @@ class CommandMenu(qw.QWidget):
         else:
             def loader():
                 self.main.update_config(name)
-                self.main.update_stats()
         return loader
 
 
@@ -430,7 +431,7 @@ class ConfigLabel(qw.QScrollArea):
         """Update the label text"""
         self.content.setText(f"<pre>{text}</pre>")
 
-    def update_config(self, cfg: Config) -> None:
+    def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
         self.set_text(cfg.text)
 
@@ -519,7 +520,7 @@ class StatsPlots(qw.QWidget):
         self.table.setData(np.array(data, dtype=cols))
         self.table.setVerticalHeaderLabels([str(i) for i in reversed(stats.epoch)])
 
-    def update_config(self, cfg: Config) -> None:
+    def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
         log.debug(f"update stats config: {cfg.name} max_epoch={cfg.epochs}")
         self._draw_plots()
@@ -569,7 +570,7 @@ class Heatmap(pg.GraphicsLayoutWidget):
                 if val > 0:
                     add_label(self.plot, x, y, val, col)
 
-    def update_config(self, cfg: Config) -> None:
+    def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
         self.plot.clear()
 
@@ -764,7 +765,7 @@ class ImageViewer(pg.GraphicsLayoutWidget):
         log.debug(f"set transformed => {on}")
         self._update()
 
-    def update_config(self, cfg: Config) -> None:
+    def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
         try:
             self.page = self.main.opts.image_page[cfg.name]
@@ -836,21 +837,30 @@ class LayerList(qw.QListWidget):
         super().__init__()
         self.setSelectionMode(qw.QAbstractItemView.MultiSelection)  # type: ignore
         self.setFixedWidth(layers_width)
-        self.states = []
+        self.indexes = []
+        self.names = {}
 
-    def set_layers(self, layers: list[str]):
+    def set_layers(self, names: list[tuple[Index, str]], enabled: list[Index]):
         """Define list of layers"""
         self.clear()
-        self.states = [False] * len(layers)
-        for i, name in enumerate(layers):
-            self.addItem(list_item(f"{i}: {name}", min_height=30))
+        self.indexes.clear()
+        self.names.clear()
+        for ix, name in names:
+            text = f"{ix}: {name}"
+            item = list_item(text, min_height=30)
+            self.addItem(item)
+            if ix in enabled:
+                item.setSelected(True)
+            self.indexes.append(ix)
+            self.names[ix] = text
 
-    def set_selected(self, i: int, on: bool) -> None:
-        self.states[i] = on
-        self.item(i).setSelected(on)
-
-    def selected(self) -> list[int]:
-        return [ix for ix, flag in enumerate(self.states) if flag]
+    def selected(self) -> list[Index]:
+        """Sorted list of indexes which are selected"""
+        sel = []
+        for i in range(self.count()):
+            if self.item(i).isSelected():
+                sel.append(self.indexes[i])
+        return sel
 
 
 class Histograms(qw.QWidget):
@@ -868,7 +878,7 @@ class Histograms(qw.QWidget):
         super().__init__()
         self.main = main
         self.model_name = ""
-        self.histograms: dict[int, Any] = {}
+        self.histograms: dict[Index, Any] = {}
         self.plots = pg.GraphicsLayoutWidget(border=True)
         self.layers = LayerList()
         self.layers.itemClicked.connect(self._select_layer)  # type: ignore
@@ -878,29 +888,25 @@ class Histograms(qw.QWidget):
         cols.addWidget(self.layers)
         self.setLayout(cols)
 
-    def update_config(self, cfg: Config) -> None:
+    def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
         self.histograms.clear()
         self.model_name = cfg.name
-        names = cfg.layer_names
-        self.layers.set_layers(names)
+        names = model.layer_names()
         try:
-            for i in self.main.opts.histogram_layers[cfg.name]:
-                self.layers.set_selected(i, True)
+            enabled = self.main.opts.histogram_layers[cfg.name]
         except KeyError:
-            for i, name in enumerate(names):
-                if i == 0 or "Conv" in name or "Linear" in name:
-                    self.layers.set_selected(i, True)
-            self.main.opts.histogram_layers[cfg.name] = self.layers.selected()
+            enabled = [ix for ix, name in names if name == "input" or "Conv" in name or "Linear" in name]
+            self.main.opts.histogram_layers[cfg.name] = enabled
             self.main.opts.save()
+        self.layers.set_layers(names, enabled)
+        log.debug(f"init histogram layers: {names} {enabled}")
 
     def _select_layer(self, item):
-        index = self.layers.indexFromItem(item).row()
-        self.layers.states[index] = not self.layers.states[index]
-        log.debug(f"Histograms: toggle {item.text()} index={index} {self.layers.states[index]}")
-        self.get_histograms(self.layers.selected())
+        selected = self.layers.selected()
+        self.get_histograms(selected)
         self._update_plots()
-        self.main.opts.histogram_layers[self.model_name] = self.layers.selected()
+        self.main.opts.histogram_layers[self.model_name] = selected
         self.main.opts.save()
 
     def update_stats(self) -> None:
@@ -909,12 +915,12 @@ class Histograms(qw.QWidget):
         self.get_histograms(self.layers.selected())
         self._update_plots()
 
-    def get_histograms(self, layers: list[int]) -> None:
+    def get_histograms(self, layers: list[Index]) -> None:
         """Get activation histogram data from loader"""
         if not self._hist_cached(layers):
             self.histograms.update(self.main.loader.get_histograms(layers))
 
-    def _hist_cached(self, layers: list[int]) -> bool:
+    def _hist_cached(self, layers: list[Index]) -> bool:
         for ix in layers:
             try:
                 _ = self.histograms[ix]
@@ -942,7 +948,7 @@ class Histograms(qw.QWidget):
             fnt.setPointSize(tiny_font_size)
             p.getAxis("bottom").setTickFont(fnt)
             p.addItem(pg.BarGraphItem(x0=xpos[:hist_bins], width=width, height=height, brush="g"))
-            p.setTitle(self.layers.item(ix).text())
+            p.setTitle(self.layers.names[ix])
             n += 1
 
 
@@ -965,7 +971,7 @@ class Activations(qw.QWidget):
         self.model_name = ""
         self.menu = main.img_menu
         self.cmap = cmap
-        self.activations: dict[int, dict[int, Tensor]] = {}
+        self.activations: dict[int, dict[Index, Tensor]] = {}
         self.index: int = 0
         self.plots = PlotGrids(cmap)
         self.layers = LayerList()
@@ -976,26 +982,24 @@ class Activations(qw.QWidget):
         cols.addWidget(self.layers)
         self.setLayout(cols)
 
-    def update_config(self, cfg: Config) -> None:
+    def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
         self.activations.clear()
         self.model_name = cfg.name
-        log.debug(f"update activation config for {self.model_name}")
-        names = cfg.layer_names
         if self.main.data:
-            self.plots.set_model(len(names), self.main.data.classes)
-        self.layers.set_layers(names)
+            self.plots.set_model(self.main.data.classes)
+        names = model.layer_names()
         try:
-            for i in self.main.opts.activation_layers[cfg.name]:
-                self.layers.set_selected(i, True)
+            enabled = self.main.opts.activation_layers[cfg.name]
         except KeyError:
-            enabled = 0
-            for i, name in enumerate(names):
-                if i == 0 or i == len(names)-1 or (enabled <= 2 and ("Conv" in name or "Linear" in name)):
-                    self.layers.set_selected(i, True)
-                    enabled += 1
-            self.main.opts.activation_layers[cfg.name] = self.layers.selected()
+            enabled = []
+            for ix, name in names:
+                if ix == names[0][0] or ix == names[-1][0] or (len(enabled) <= 2 and ("Conv" in name or "Linear" in name)):
+                    enabled.append(ix)
+            self.main.opts.activation_layers[cfg.name] = enabled
             self.main.opts.save()
+        log.debug(f"init activation layers: {names} {enabled}")
+        self.layers.set_layers(names, enabled)
         self.index = self.main.opts.activation_index.get(cfg.name, 0)
 
     @property
@@ -1005,13 +1009,13 @@ class Activations(qw.QWidget):
         else:
             return 0
 
-    def get_activations(self, layers: list[int], index: int) -> dict[int, Tensor]:
+    def get_activations(self, layers: list[Index], index: int) -> dict[Index, Tensor]:
         """Get activations tensor for given image"""
         if not self._activ_cached(layers, index):
             self.activations[index].update(self.main.loader.get_activations(layers, index))
         return self.activations[index]
 
-    def _activ_cached(self, layers: list[int], index: int) -> bool:
+    def _activ_cached(self, layers: list[Index], index: int) -> bool:
         try:
             _ = self.activations[index]
         except KeyError:
@@ -1025,12 +1029,10 @@ class Activations(qw.QWidget):
         return True
 
     def _select_layer(self, item):
-        index = self.layers.indexFromItem(item).row()
-        self.layers.states[index] = not self.layers.states[index]
-        log.debug(f"toggle {item.text()} index={index} {self.layers.states[index]}")
-        activations = self.get_activations(self.layers.selected(), self.index)
-        self.plots.update_plots(activations, self.layers.states)
-        self.main.opts.activation_layers[self.model_name] = self.layers.selected()
+        selected = self.layers.selected()
+        activations = self.get_activations(selected, self.index)
+        self.plots.update_plots(activations, selected, self.layers.indexes[-1])
+        self.main.opts.activation_layers[self.model_name] = selected
         self.main.opts.save()
 
     def prev(self) -> None:
@@ -1064,12 +1066,13 @@ class Activations(qw.QWidget):
         if not self.main.data:
             return
         log.debug(f"update activation plots for {self.model_name}:{self.index}")
-        activations = self.get_activations(self.layers.selected(), self.index)
+        selected = self.layers.selected()
+        activations = self.get_activations(selected, self.index)
         self.menu.label.setText(f"Image {self.effective_index+1} of {self.samples}")
         ds = self.main.data
         tgt = ds.targets[self.index]
         self.menu.info.setText(f"{self.index}: target={ds.classes[tgt]}")
-        self.plots.update_plots(activations, self.layers.states)
+        self.plots.update_plots(activations, selected, self.layers.indexes[-1])
 
     @property
     def effective_index(self) -> int:
@@ -1093,60 +1096,57 @@ class PlotGrids(qw.QWidget):
     """PlotGrids is the containing widget for the layout with the set of activation layer grids
 
     Args:
-        cmap                         colormap name
+        cmap                           colormap name
 
     Properties:
-        layers: dict[int, PlotGrid]  current set of layers
-        layer_state: list[bool]      flag indicating which layers are enabled
+        layers:dict[Index,PlotGrid]    current set of layers
+        layer_state:list[Index]        list of currently selected layers
     """
 
     def __init__(self, cmap: str | None = None):
         super().__init__()
         set_background(self, bgcolor)
-        self.layer_state: list[bool] = []
-        self.layers: dict[int, PlotGrid] = {}
+        self.layer_state: list[Index] = []
+        self.layers: dict[Index, PlotGrid] = {}
         self.cmap = cmap
         self.classes = None
         self._layout = PlotLayout()
         self.setLayout(self._layout)
 
-    def set_model(self, nlayers: int, classes=None):
+    def set_model(self, classes=None):
         """Called when model is loaded"""
         self.layers = {}
-        self.layer_state = [False] * nlayers
+        self.layer_state = []
         self.classes = classes
         self.table = OutputTable(classes)
 
-    def update_plots(self, activations: dict[int, Tensor], layer_state: list[bool]) -> None:
+    def update_plots(self, activations: dict[Index, Tensor], layers: list[Index], out_layer: Index) -> None:
         """update the grids to display the new activation tensors"""
-        self.table.set_outputs(activations[len(self.layer_state)-1][0])
-        ids = [i for i, flag in enumerate(layer_state) if flag]
-        if layer_state == self.layer_state:
-            log.debug(f"update plots: index={ids} {activations.keys()}")
-            for i, grid in self.layers.items():
-                if layer_state[i]:
-                    grid.set_data(activations[i][0].numpy())
-                    grid.draw()
+        self.table.set_outputs(activations[out_layer][0])
+        if layers == self.layer_state:
+            log.debug(f"update plots: index={layers}")
+            for ix in layers:
+                grid = self.layers[ix]
+                grid.set_data(activations[ix][0].numpy())
+                grid.draw()
             self._layout.resize_table()
         else:
-            log.debug(f"draw plots: index={ids} {activations.keys()}")
+            log.debug(f"draw plots: index={layers}")
+            self.layer_state = layers.copy()
             self._layout.clear()
-            for i, enabled in enumerate(layer_state):
-                if enabled:
-                    self._layout.addWidget(self._grid(i, activations[i][0].numpy()))
-                    empty = False
+            for ix in layers:
+                self._layout.addWidget(self.grid(ix, activations[ix][0].numpy()))
             self._layout.addWidget(self.table)
-            self.layer_state = layer_state.copy()
 
-    def _grid(self, i: int, data: np.ndarray) -> "PlotGrid":
+    def grid(self, ix: Index, data: np.ndarray) -> "PlotGrid":
         try:
-            grid = self.layers[i]
+            grid = self.layers[ix]
             grid.set_data(data)
         except KeyError:
-            labels = self.classes if i == len(self.layer_state)-1 else None
-            is_rgb = (i == 0 and data.shape[0] == 3)
+            labels = self.classes if ix == self.layer_state[-1] else None
+            is_rgb = (ix == Index((0,)) and data.shape[0] == 3)
             grid = PlotGrid(data, cmap=self.cmap, xlabels=labels, rgbimage=is_rgb)
-            self.layers[i] = grid
+            self.layers[ix] = grid
         return grid
 
 

@@ -5,7 +5,7 @@ if not sys.warnoptions:
     warnings.filterwarnings("ignore", message="torch.distributed.reduce_op is deprecated")
     warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
 
-from .config import Config
+from .config import Config, Index
 from .dataset import Dataset
 from .gui import MainWindow, init_gui
 from .loader import DBLoader, FileLoader

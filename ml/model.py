@@ -5,47 +5,12 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from .config import Config
-from .utils import InvalidConfigError, format_args, get_module, splitargs
+from .config import Config, Index
+from .utils import (InvalidConfigError, format_args, get_module, getarg,
+                    splitargs)
 
 
-class Index(tuple):
-    """Index is a unique id to reference each layer in the model.
-
-    For a sequential stack of layers it will be a single integer. For more complex modules it will be a tuple.
-    e.g. ["Conv2d", "RelU", ["Add", ["Conv2d", "BatchNorm2d", ...], ["Conv2d", "BatchNorm2d"]], "ReLU", ... ]
-        Index(2, 0, 1) is the first BatchNorm2d layer in the list
-    """
-
-    def __new__(self, *ix):
-        return tuple.__new__(Index, ix)
-
-    def next(self) -> "Index":
-        if len(self) == 0:
-            return Index(0)
-        elif len(self) == 1:
-            return Index(self[0]+1)
-        else:
-            return Index(*self[:-1], self[-1]+1)
-
-    def __str__(self):
-        return ".".join([str(ix) for ix in self])
-
-
-class Module:
-    """Base class for all of the network submodules"""
-
-    def __init__(self, index: Index, typ: str):
-        super().__init__()
-        self.index = index
-        self.typ = typ
-        self.out_shape = torch.Size()
-
-    def forward(self, x: Tensor) -> Tensor:
-        raise NotImplementedError("virtual method")
-
-
-class Layer(Module):
+class Layer(nn.Module):
     """Layer wraps a single torch.nn layer.
 
     Args:
@@ -55,30 +20,109 @@ class Layer(Module):
 
     Attributes:
         typ:str                 type name as defined in config file
-        layer:nn.Module         wrapped module - uses Lazy version of torch.nn class where available
+        module:nn.Module        wrapped module - uses Lazy version of torch.nn class where available
         out_shape:torch.Size    output shape - set when containing Model is initialised
     """
 
     def __init__(self, index: Index, args: list[Any], vars=None):
-        super().__init__(index, args[0])
-        log.debug(f"{index} layer: {args}")
-        self.layer = get_module(torch.nn, args, vars=vars, desc="model")
+        super().__init__()
+        self.index = index
+        self.typ = args[0]
+        self.out_shape = torch.Size()
+        self.module = get_module(torch.nn, args, vars=vars, desc="model")
+        log.debug(f"  {index} {repr(self.module)}")
 
     def forward(self, x: Tensor) -> Tensor:
-        x = self.layer(x)
+        return self.module(x)
+
+    def initialise(self, input: Tensor) -> Tensor:
+        log.debug(f"{self.index} {self.typ} initialise {list(input.shape)}")
+        x = self(input)
         self.out_shape = x.size()[1:]
         return x
 
-    def num_params(self) -> int:
-        n = 0
-        for p in self.layer.parameters():
-            n += math.prod(p.size())
-        return n
+    def layer_names(self) -> list[tuple[Index, str]]:
+        return [(self.index, self.typ)]
+
+    def get_activations(self, input: Tensor, layers: list[Index], res: dict[Index, Any], hist_bins: int = 0) -> Tensor:
+        x = self(input)
+        if self.index in layers:
+            add_activations(res, self.index, x, hist_bins)
+        return x
 
     def __str__(self) -> str:
-        s = f"{str(self.index):>2}: {self.typ:12}{str(list(self.out_shape)):15}"
-        n = self.num_params()
-        s += f"  params={n}" if n else ""
+        s = f"{str(self.index):6}: {self.typ:12}{str(list(self.out_shape)):15}"
+        n = num_params(self)
+        s += f"  {n:,} params" if n else ""
+        return s
+
+
+class AddBlock(nn.Module):
+    """Component of a ResNet network, Returns block1(x) + block2(x).
+
+    Args:
+        model:Model             parent model
+        index:Index             unique layer index
+        argv:list               argument list from parsed config file = [block1, block2]
+        vars:dict               variables in config to resolve [optional]
+
+    Attributes:
+        layers:dict             registered layers from Model
+        module1:nn.Sequential   block1 module list
+        module2:nn.Sequential   block2 module list
+        block1:list             indexes of block1 layers
+        block2:list             indexes of block2 layers
+    """
+
+    def __init__(self, model: "Model", index: Index, args: list[Any], vars: dict[str, Any] | None):
+        super().__init__()
+        self.layers = model.layers
+        self.index = index
+        self.typ = "AddBlock"
+        if len(args) != 2:
+            raise InvalidConfigError(f"expecting 2 args for AddBlock - got {args}")
+        log.debug(f"  {index} AddBlock {args}")
+
+        self.module1 = nn.Sequential()
+        self.block1: list[Index] = []
+        model.add(Index(index + (0, 0)), self.block1, self.module1, [args[0]], vars=vars)
+
+        self.module2 = nn.Sequential()
+        self.block2: list[Index] = []
+        model.add(Index(index + (1, 0)), self.block2, self.module2, [args[1]], vars=vars)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.module1(x) + self.module2(x)
+
+    def initialise(self, input: Tensor) -> Tensor:
+        log.debug(f"{self.index} {self.typ} initialise {list(input.shape)}")
+        x = input
+        for ix in self.block1:
+            x = self.layers[ix].initialise(x)
+        y = input
+        for ix in self.block2:
+            y = self.layers[ix].initialise(y)
+        return x + y
+
+    def layer_names(self) -> list[tuple[Index, str]]:
+        names = []
+        for ix in self.block1 + self.block2:
+            names.extend(self.layers[ix].layer_names())
+        return names
+
+    def get_activations(self, input: Tensor, layers: list[Index], res: dict[Index, Any], hist_bins: int = 0) -> Tensor:
+        x = input
+        for ix in self.block1:
+            x = self.layers[ix].get_activations(x, layers, res, hist_bins)
+        y = input
+        for ix in self.block2:
+            y = self.layers[ix].get_activations(y, layers, res, hist_bins)
+        return x + y
+
+    def __str__(self) -> str:
+        s = "[AddBlock]"
+        for ix in self.block1 + self.block2:
+            s += "\n" + str(self.layers[ix])
         return s
 
 
@@ -101,19 +145,17 @@ class Model(nn.Sequential):
     def __init__(self, config: Config, input_shape: torch.Size, device: str = "cpu", init_weights: bool = False):
         super().__init__()
         self.config = config
+        self.model_cfg = config.cfg.get("model", {})
         self.device = device
         self.input_shape = input_shape
-
+        self.layers: dict[Index, Any] = {}
         self.indexes: list[Index] = []
-        self.layers: dict[Index, Layer] = {}
-        index = Index(0)
-        for args in config.layers:
-            index = self.add(index, args)
+        self.add(Index((1,)), self.indexes, self, ["layers"])
 
         x = torch.zeros((1,) + self.input_shape)
         for index in self.indexes:
             try:
-                x = self.layers[index].forward(x)
+                x = self.layers[index].initialise(x)
             except RuntimeError as err:
                 raise InvalidConfigError(f"error building model: {err}")
 
@@ -122,60 +164,73 @@ class Model(nn.Sequential):
             self.apply(self._weight_init)
         self.to(device)
 
-    def add(self, index: Index, args: list[Any], vars=None) -> Index:
-        """Append a new layer to the network at index and return the next index"""
+    def add(self, index: Index, indexes: list[Index], seq: nn.Sequential, args: list[Any], vars=None) -> Index:
+        """Append a new layer or group to the network at index and return the next index """
         if not isinstance(args, list) or len(args) == 0:
             raise InvalidConfigError(f"invalid layer args: {args}")
-        cfg = self.config.cfg.get("model", {})
-        defn = cfg.get(args[0])
-        if defn and isinstance(defn, list):
-            _, _, vars = splitargs(args)
-            for item in defn:
-                index = self.add(index, item, vars)
+        defn = self.model_cfg.get(args[0])
+        if defn or args[0] == "AddBlock" or self.model_cfg.get(args[0]):
+            typ, block_args, block_vars = splitargs(args)
+            if block_vars:
+                if vars is None:
+                    vars = {}
+                for name, var in block_vars.items():
+                    vars[name] = getarg(var, vars)
+            if args[0] == "AddBlock":
+                adder = AddBlock(self, index, block_args, vars)
+                seq.append(adder)
+                self.layers[index] = adder
+            elif defn and isinstance(defn, list):
+                log.debug(f"[{typ}] {vars}")
+                for item in defn:
+                    index = self.add(index, indexes, seq, item, vars)
+                return index
+            else:
+                raise InvalidConfigError(f"block definition should be a list - got {defn}")
         else:
-            m = Layer(index, args, vars)
-            self.append(m.layer)
-            self.indexes.append(index)
-            self.layers[index] = m
-            index = index.next()
-        return index
+            layer = Layer(index, args, vars)
+            seq.append(layer)
+            self.layers[index] = layer
+        indexes.append(index)
+        return index.next()
 
-    def activations(self, input: Tensor, layers: list[int], hist_bins: int = 0) -> dict[int, Any]:
+    def layer_names(self) -> list[tuple[Index, str]]:
+        """Flattened list of layer index and name for all layers in the network"""
+        names = [(Index((0,)), "input")]
+        for ix in self.indexes:
+            names.extend(self.layers[ix].layer_names())
+        return names
+
+    def activations(self, input: Tensor, layers: list[Index], hist_bins: int = 0) -> dict[Index, Any]:
         """Evaluate model and returns activations or histograms of activations for each layer given"""
         self.eval()
-        res = {}
-
-        def add(i, x):
-            if hist_bins:
-                vals = x.to(dtype=torch.float32).flatten()
-                x0, x1 = torch.min(vals).item(), torch.max(vals).item()
-                hist = torch.histc(vals, hist_bins, x0, x1)
-                log.debug(f"model histogram: layer={i} range={x0:.2f}:{x1:.2f}")
-                res[i] = hist.cpu(), x0, x1
-            else:
-                log.debug(f"model activations: layer={i} shape={list(x.shape)}")
-                res[i] = x.cpu()
-
+        res: dict[Index, Any] = {}
         with torch.no_grad():
             x = input
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.config.half):
-                for i, layer in enumerate(self):
-                    if i in layers:
-                        add(i, x)
-                    x = layer(x)
-                add(len(self), x)
+                if Index((0,)) in layers:
+                    add_activations(res, Index((0,)), x, hist_bins)
+                for ix in self.indexes:
+                    x = self.layers[ix].get_activations(x, layers, res, hist_bins)
         return res
 
     def __str__(self):
         s = "== model =="
+        total_params = 0
         for index in self.indexes:
-            s += "\n" + str(self.layers[index])
+            m = self.layers[index]
+            s += "\n" + str(m)
+            total_params += num_params(m)
+        s += f"\ntotal parameters: {total_params:,}"
         for key in sorted(self.weight_info.keys()):
             s += f"\n{key:20}: {self.weight_info[key]}"
         return s
 
-    @torch.no_grad()
+    @ torch.no_grad()
     def _weight_init(self, layer: nn.Module):
+        if (isinstance(layer, Model) or isinstance(layer, Layer) or isinstance(layer, AddBlock)
+                or isinstance(layer, nn.Sequential)):
+            return
         typ = type(layer).__name__
         for name, param in layer.named_parameters():
             init_config = self.config.weight_init if name == "weight" else self.config.bias_init
@@ -185,7 +240,6 @@ class Model(nn.Sequential):
 def init_parameter(weight_info, weight_type, layer_type, param, config) -> None:
 
     def set_weights(param, argv):
-        log.debug(f"init {weight_type} for {layer_type}: {argv}")
         typ, args, kwargs = splitargs(argv)
         try:
             getattr(torch.nn.init, typ+"_")(param, *args, **kwargs)
@@ -202,3 +256,23 @@ def init_parameter(weight_info, weight_type, layer_type, param, config) -> None:
         if key in layer_type:
             set_weights(param, argv)
             return
+    raise InvalidConfigError(f"no {weight_type} init found for {layer_type}")
+
+
+def num_params(m: nn.Module) -> int:
+    n = 0
+    for p in m.parameters():
+        n += math.prod(p.size())
+    return n
+
+
+def add_activations(res, index, x, hist_bins=0):
+    if hist_bins:
+        vals = x.to(dtype=torch.float32).flatten()
+        x0, x1 = torch.min(vals).item(), torch.max(vals).item()
+        hist = torch.histc(vals, hist_bins, x0, x1)
+        log.debug(f"model histogram: layer={index} range={x0:.2f}:{x1:.2f}")
+        res[index] = hist.cpu(), x0, x1
+    else:
+        log.debug(f"model activations: layer={index} shape={list(x.shape)}")
+        res[index] = x.cpu()

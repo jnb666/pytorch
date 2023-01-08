@@ -11,7 +11,7 @@ import torch
 import zmq
 from torch import nn
 
-from .config import Config
+from .config import Config, Index
 from .database import Database, State
 from .model import Model
 from .trainer import Datasets, Stats, Trainer
@@ -44,7 +44,7 @@ class BaseContext:
 
     def load_config(self, cfg: Config) -> None:
         set_logdir(cfg.dir)
-        log.debug(cfg)
+        # log.debug(cfg)
         device = "cuda" if self.device == "cuda" else "cpu"
         dtype = torch.float16 if cfg.half else torch.float32
         self.cfg = cfg
@@ -228,30 +228,25 @@ class Server(BaseContext):
             return model
         return None
 
-    def get_activations(self, layers: list[int], index: int) -> None:
-        log.debug(f"cmd: activations {layers} {index}")
+    def get_activations(self, name: str, layers: list[Index], index: int = 0, hist_bins: int = 0) -> None:
+        log.debug(f"cmd: {name} {layers} {index} hist_bins={hist_bins}")
         model = self.get_model()
         if not self.ds or not model:
             self.error("config not loaded")
             return
         test_data = self.ds.test_data
-        input = test_data.data[index:index+1]
-        activations = model.activations(input, layers)
-        for layer in layers:
-            self.db.save(activations[layer], "ml:activations", f"{layer}:{index}")
-        self.ok()
-
-    def get_histograms(self, layers: list[int]) -> None:
-        log.debug(f"cmd: histograms {layers}")
-        model = self.get_model()
-        if not self.ds or not model:
-            self.error("config not loaded")
-            return
-        test_data = self.ds.test_data
-        input = test_data.data[:test_data.batch_size]
-        histograms = model.activations(input, layers, hist_bins=100)
-        for layer in layers:
-            self.db.save(histograms[layer], "ml:histograms", str(layer))
+        if name == "ml:activations":
+            input = test_data.data[index:index+1]
+        else:
+            input = test_data.data[:test_data.batch_size]
+        layers = [Index(i) for i in layers]
+        activations = model.activations(input, layers, hist_bins=hist_bins)
+        for layer, val in activations.items():
+            key = str(layer)
+            if name == "ml:activations":
+                key += f":{index}"
+            log.debug(f"save {name} {key}")
+            self.db.save(val, name, key)
         self.ok()
 
     def get_command(self) -> bool:
@@ -273,9 +268,9 @@ class Server(BaseContext):
             case ["pause", bool(on)]:
                 self.pause(on)
             case ["activations", list(layers), int(index)]:
-                self.get_activations(layers, index)
+                self.get_activations("ml:activations", layers, index)
             case ["histograms", list(layers)]:
-                self.get_histograms(layers)
+                self.get_activations("ml:histograms", layers, hist_bins=100)
             case _:
                 self.error(f"invalid command: {cmd}")
         return not self.started or self.paused
@@ -307,7 +302,13 @@ class Client:
             raise RuntimeError(f"send: malformed response: {status}")
         if status[0] != "ok":
             log.error(f"{cmd[0]} error: {status[1]}")
-        log.info(f"sent cmd: {cmd} {elapsed:.3f}s")
+        cmd_list = []
+        for arg in cmd:
+            if isinstance(arg, list):
+                cmd_list.append(" ".join([str(i) for i in arg]))
+            else:
+                cmd_list.append(arg)
+        log.info(f"sent cmd: {cmd_list} {elapsed:.3f}s")
         return status[0], status[1]
 
 

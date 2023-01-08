@@ -29,6 +29,29 @@ default_bias_init = {
 }
 
 
+class Index(tuple):
+    """Index is a unique id to reference each layer in the model.
+
+    For a sequential stack of layers it will be a single integer. For more complex modules it will be a tuple.
+    e.g. ["Conv2d", "RelU", ["Add", ["Conv2d", "BatchNorm2d", ...], ["Conv2d", "BatchNorm2d"]], "ReLU", ... ]
+        Index(2, 0, 1) is the first BatchNorm2d layer in the list
+    """
+
+    def __new__(self, ixs):
+        return tuple.__new__(Index, ixs)
+
+    def next(self) -> "Index":
+        if len(self) == 0:
+            return Index((0,))
+        elif len(self) == 1:
+            return Index((self[0]+1,))
+        else:
+            return Index((*self[:-1], self[-1]+1))
+
+    def __str__(self):
+        return ".".join([str(ix) for ix in self])
+
+
 class Config():
     """Config object has results of config data parsed from the toml file.
 
@@ -87,10 +110,6 @@ class Config():
             self.epochs = epochs
         else:
             self.epochs = int(self.train.get("epochs", 100))
-        try:
-            self.layers, self.layer_names = self._get_layers()
-        except (KeyError, TypeError):
-            raise InvalidConfigError("model layer definition missing or invalid")
 
     def save(self, clear: bool = False) -> None:
         """Save a copy of the config file to the run directory and optionally clear any data from prior runs."""
@@ -150,17 +169,6 @@ class Config():
         for args in config:
             transform.append(get_module(K.augmentation, args, desc="transform"))
         return transform
-
-    def _get_layers(self) -> tuple[list[Any], list[str]]:
-        cfg = self.cfg["model"]
-        names = ["input"]
-        for args in cfg["layers"]:
-            defn = cfg.get(args[0])
-            if defn is None:
-                names.append(args[0])
-            else:
-                names.extend([sub[0] for sub in defn])
-        return cfg["layers"], names
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Create a new optimizer based on config [train] optimizer setting"""

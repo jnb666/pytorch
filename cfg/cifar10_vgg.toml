@@ -9,13 +9,6 @@ normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 [test_data]
 dataset = "CIFAR10"
 batch_size = 500
-end = 5000
-normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
-
-[valid_data]
-dataset = "CIFAR10"
-start = 5000
-batch_size = 500
 normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 
 [model]
@@ -25,25 +18,25 @@ conv = [
   ["ReLU", {inplace=true} ],
 ]
 
+stack2 = [
+  ["conv", {nfeat="$nfeat"} ],
+  ["conv", {nfeat="$nfeat"} ],
+  ["MaxPool2d", {kernel_size=2, stride=2}],  
+]
+
+stack3 = [
+  ["conv", {nfeat="$nfeat"} ],
+  ["conv", {nfeat="$nfeat"} ],
+  ["conv", {nfeat="$nfeat"} ],
+  ["MaxPool2d", {kernel_size=2, stride=2}],  
+]
+
 layers = [
-  ["conv", {nfeat=64} ],
-  ["conv", {nfeat=64} ],
-  ["MaxPool2d", {kernel_size=2, stride=2}],
-  ["conv", {nfeat=128} ],
-  ["conv", {nfeat=128} ],
-  ["MaxPool2d", {kernel_size=2, stride=2}],
-  ["conv", {nfeat=256} ],
-  ["conv", {nfeat=256} ],
-  ["conv", {nfeat=256} ],
-  ["MaxPool2d", {kernel_size=2, stride=2}],
-  ["conv", {nfeat=512} ],
-  ["conv", {nfeat=512} ],
-  ["conv", {nfeat=512} ],
-  ["MaxPool2d", {kernel_size=2, stride=2}],
-  ["conv", {nfeat=512} ],
-  ["conv", {nfeat=512} ],
-  ["conv", {nfeat=512} ],
-  ["MaxPool2d", {kernel_size=2, stride=2}],
+  ["stack2", {nfeat=64} ],
+  ["stack2", {nfeat=128} ],
+  ["stack3", {nfeat=256} ],
+  ["stack3", {nfeat=512} ],
+  ["stack3", {nfeat=512} ],
   ["AvgPool2d", {kernel_size=1, stride=1}],
   ["Flatten"],
   ["Linear", 10 ],
@@ -56,9 +49,8 @@ transforms = [
 ]
 
 [train]
-optimizer = ["Adam", {lr=0.001, weight_decay=5e-4} ]
-scheduler = ["StepLRandWeightDecay", {step_size=15, gamma=0.3} ]
-stop = {epochs=2, extra=4, avg=12}
-epochs = 80
+optimizer = ["SGD", {lr=0.01, momentum=0.9, nesterov=true, weight_decay=5e-4} ]
+scheduler = ["CosineAnnealingLR", {T_max=100} ]
+epochs = 100
 shuffle = true
 

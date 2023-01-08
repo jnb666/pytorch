@@ -1,7 +1,5 @@
 TODO
 ====
-- resnet example - implement resnet block
-
 - check repeatable runs
 
 - CPU and memory profiling

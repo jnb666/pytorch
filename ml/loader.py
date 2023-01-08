@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from .config import Config
+from .config import Config, Index
 from .dataset import Dataset
 from .model import Model
 from .rpc import Database
@@ -36,16 +36,16 @@ class Loader:
     def load_model(self, name: str) -> str:
         raise NotImplementedError("abstract method")
 
-    def load_config(self, name: str) -> tuple[Config, Dataset, nn.Module | None]:
+    def load_config(self, name: str) -> tuple[Config, Model, Dataset, nn.Module | None]:
         raise NotImplementedError("abstract method")
 
     def load_stats(self, stats: Stats) -> None:
         raise NotImplementedError("abstract method")
 
-    def get_activations(self, layers: list[int], index: int) -> dict[int, Any]:
+    def get_activations(self, layers: list[Index], index: int) -> dict[Index, Any]:
         raise NotImplementedError("abstract method")
 
-    def get_histograms(self, layers: list[int]) -> dict[int, Any]:
+    def get_histograms(self, layers: list[Index]) -> dict[Index, Any]:
         raise NotImplementedError("abstract method")
 
 
@@ -73,7 +73,7 @@ class FileLoader(Loader):
             raise InvalidConfigError(f"file not found: {err}")
         return data
 
-    def load_config(self, name: str) -> tuple[Config, Dataset, nn.Module | None]:
+    def load_config(self, name: str) -> tuple[Config, Model, Dataset, nn.Module | None]:
         file = path.join(self.cfgdir, name + ".toml")
         cfg = Config(file=file, rundir=self.rundir)
         self.data = cfg.dataset(self.datadir, "test", device=self.device)
@@ -84,19 +84,19 @@ class FileLoader(Loader):
         self.checkpoint = torch.load(file, map_location=self.device)
         log.info(f"loaded checkpoint from {file}")
         self.model.load_state_dict(self.checkpoint["model_state_dict"])
-        return cfg, self.data, transform
+        return cfg, self.model, self.data, transform
 
     def load_stats(self, stats: Stats) -> None:
         stats.load_state_dict(self.checkpoint["stats_state_dict"])
 
-    def get_activations(self, layers: list[int], index: int) -> dict[int, Any]:
+    def get_activations(self, layers: list[Index], index: int) -> dict[Index, Any]:
         if not self.data or not self.model:
             return {}
         input = self.data.data[index]
         log.debug(f"get_activations: {layers} index={index}")
         return self.model.activations(input.view((1,)+input.size()), layers)
 
-    def get_histograms(self, layers: list[int]) -> dict[int, Any]:
+    def get_histograms(self, layers: list[Index]) -> dict[Index, Any]:
         if not self.data or not self.model:
             return {}
         input = self.data.data[:self.data.batch_size]
@@ -121,30 +121,31 @@ class DBLoader(Loader):
     def load_model(self, name: str) -> str:
         return self.db.get_config(name)
 
-    def load_config(self, name: str) -> tuple[Config, Dataset, nn.Module | None]:
+    def load_config(self, name: str) -> tuple[Config, Model, Dataset, nn.Module | None]:
         log.debug(f"DBloader: load_config {name}")
         cfg = Config(name=name, data=self.db.get_config(name), rundir=self.rundir)
         test_data = cfg.dataset(self.datadir, "test", device=self.device)
         transform = cfg.transforms()
-        return cfg, test_data, transform
+        model = Model(cfg, test_data.image_shape, device=self.device)
+        return cfg, model, test_data, transform
 
     def load_stats(self, stats: Stats) -> None:
         stats.load_state_dict(self.db.load("ml:stats", device=self.device))
 
-    def get_activations(self, layers: list[int], index: int) -> dict[int, Tensor]:
+    def get_activations(self, layers: list[Index], index: int) -> dict[Index, Tensor]:
         missing = self.db.check_exists("ml:activations", [f"{i}:{index}" for i in layers])
         if missing:
             self.send("activations", missing, index)
         res = {}
         for layer in layers:
-            res[layer] = self.db.load("ml:activations", f"{layer}:{index}", device=self.device)
+            res[layer] = self.db.load("ml:activations", str(layer)+":"+str(index), device=self.device)
         return res
 
-    def get_histograms(self, layers: list[int]) -> dict[int, Any]:
+    def get_histograms(self, layers: list[Index]) -> dict[Index, Any]:
         missing = self.db.check_exists("ml:histograms", [f"{i}" for i in layers])
         if missing:
             self.send("histograms", missing)
         res = {}
         for layer in layers:
-            res[layer] = self.db.load("ml:histograms", f"{layer}", device=self.device)
+            res[layer] = self.db.load("ml:histograms", str(layer), device=self.device)
         return res
