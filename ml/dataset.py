@@ -70,10 +70,9 @@ class Dataset:
         return self.data.size()[1]
 
     @property
-    def image_shape(self) -> tuple[int, int, int]:
+    def image_shape(self) -> torch.Size:
         """Shape of each image"""
-        size = self.data.size()
-        return size[1], size[2], size[3]
+        return self.data.size()[1:]
 
     def to(self, device="cpu") -> "Dataset":
         """Move tensors to given device and return a new copy of the dataset"""

@@ -88,8 +88,8 @@ class Config():
         else:
             self.epochs = int(self.train.get("epochs", 100))
         try:
-            self.layer_names = self._get_layer_names()
-        except KeyError:
+            self.layers, self.layer_names = self._get_layers()
+        except (KeyError, TypeError):
             raise InvalidConfigError("model layer definition missing or invalid")
 
     def save(self, clear: bool = False) -> None:
@@ -151,7 +151,7 @@ class Config():
             transform.append(get_module(K.augmentation, args, desc="transform"))
         return transform
 
-    def _get_layer_names(self) -> list[str]:
+    def _get_layers(self) -> tuple[list[Any], list[str]]:
         cfg = self.cfg["model"]
         names = ["input"]
         for args in cfg["layers"]:
@@ -160,7 +160,7 @@ class Config():
                 names.append(args[0])
             else:
                 names.extend([sub[0] for sub in defn])
-        return names
+        return cfg["layers"], names
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Create a new optimizer based on config [train] optimizer setting"""

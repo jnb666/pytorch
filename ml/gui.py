@@ -39,7 +39,8 @@ menu_bgcolor = "#333"
 fgcolor = "w"
 spacing = 15
 margins = 4
-layer_list_width = 150
+menu_width = 120
+layers_width = 150
 hist_bins = 100
 config_file = path.expanduser("~/.pytorch_gui")
 
@@ -135,8 +136,8 @@ class MainWindow(qw.QWidget):
         cols = qw.QHBoxLayout()
         cols.setSpacing(0)
         cols.setContentsMargins(0, 0, 0, 0)
-        cols.addWidget(self.menu, 1)
-        cols.addLayout(rows, 9)
+        cols.addWidget(self.menu)
+        cols.addLayout(rows)
         self.setLayout(cols)
         self._set_size()
 
@@ -176,6 +177,7 @@ class MainWindow(qw.QWidget):
         ]
         self.content = qw.QStackedWidget()
         self.menu = qw.QListWidget()
+        self.menu.setFixedWidth(menu_width)
         for i, name in enumerate(["stats", "heatmap", "images", "activations", "histograms", "config"]):
             self.content.addWidget(self.pages[i])
             self.menu.addItem(list_item(name, center=True, min_height=50))
@@ -245,6 +247,9 @@ class ConfigMenu(qw.QWidget):
         self._error_label = qw.QLabel()
         self._errors = self._error_box(self._error_label)
         self._errors.hide()
+        self._stretch = qw.QLabel("")
+        self._stretch.setSizePolicy(qw.QSizePolicy.Expanding, qw.QSizePolicy.Fixed)  # type: ignore
+
         cols = qw.QHBoxLayout()
         cols.setContentsMargins(margins, margins, margins, margins)
         cols.addSpacing(spacing)
@@ -252,18 +257,20 @@ class ConfigMenu(qw.QWidget):
         cols.addSpacing(spacing)
         cols.addWidget(self.cmd_menu)
         cols.addWidget(self._errors)
-        cols.addSpacing(spacing)
+        cols.addWidget(self._stretch)
         self.setLayout(cols)
         self.update_stats(main.stats)
 
     def set_error(self, err: str) -> None:
         self._error_label.setText(err)
         if err:
-            self._errors.show()
             self.cmd_menu.hide()
+            self._stretch.hide()
+            self._errors.show()
         else:
             self._errors.hide()
             self.cmd_menu.show()
+            self._stretch.show()
 
     def _error_box(self, label):
         # force error label to expand to use all available space without resizing the window
@@ -335,7 +342,8 @@ class CommandMenu(qw.QWidget):
             self.max_epoch = qw.QLineEdit()
             self.max_epoch.setFixedWidth(50)
             self.max_epoch.setValidator(QIntValidator(0, 999))
-            self.max_epoch.editingFinished.connect(lambda: self.send("max_epoch", int(self.max_epoch.text())))  # type: ignore
+            self.max_epoch.editingFinished.connect(lambda: self.send(  # type: ignore
+                "max_epoch", int(self.max_epoch.text())))
         cols = qw.QHBoxLayout()
         cols.setContentsMargins(margins, margins, margins, margins)
         if self.send:
@@ -361,12 +369,9 @@ class CommandMenu(qw.QWidget):
         if self.send:
             self._update_epoch_list(stats.current_epoch)
             self.max_epoch.setText(str(cfg.epochs))
-        self.enable_start(True)
-
-    def enable_start(self, on: bool) -> None:
-        self.start.setEnabled(on)
-        self.resume.setEnabled(on)
-        self.stop.setEnabled(False)
+            self.start.setEnabled(True)
+            self.resume.setEnabled(True)
+            self.stop.setEnabled(False)
 
     def update_stats(self, stats: Stats) -> None:
         """Called after loading config and after each epoch"""
@@ -444,12 +449,13 @@ class StatsPlots(qw.QWidget):
         super().__init__()
         self.main = main
         self.table = pg.TableWidget(editable=False, sortable=False)
+        self.table.setSizePolicy(qw.QSizePolicy.Expanding, qw.QSizePolicy.Preferred)  # type: ignore
         self.plots = pg.GraphicsLayoutWidget(border=True)
         self._draw_plots()
         cols = qw.QHBoxLayout()
         cols.setContentsMargins(0, 0, 0, 0)
-        cols.addWidget(self.table, 2)
-        cols.addWidget(self.plots, 3)
+        cols.addWidget(self.table)
+        cols.addWidget(self.plots)
         self.setLayout(cols)
 
     def _draw_plots(self) -> None:
@@ -829,7 +835,7 @@ class LayerList(qw.QListWidget):
     def __init__(self):
         super().__init__()
         self.setSelectionMode(qw.QAbstractItemView.MultiSelection)  # type: ignore
-        self.setFixedWidth(layer_list_width)
+        self.setFixedWidth(layers_width)
         self.states = []
 
     def set_layers(self, layers: list[str]):

@@ -75,31 +75,34 @@ def set_seed(seed: int) -> None:
     log.info(f'Set random seed={seed}')
 
 
-def get_definition(pkg, defn, vars, expand=None):
-    layers = []
-    for args in defn:
-        log.debug(f"add layer: {args} vars={vars}")
-        layer = get_module(pkg, args, vars, expand, desc="model")
-        layers.append(layer)
-    return layers
-
-
-def get_module(pkg, args, vars=None, expand=None, desc=""):
-    args = list(args).copy()
-    if expand:
-        args[0] = expand(args[0])
-    kwargs = {}
-    if len(args) > 1 and isinstance(args[-1], dict):
-        kwargs = args.pop().copy()
-    for i, arg in enumerate(args[1:]):
-        args[1+i] = getarg(arg, vars)
+def get_module(pkg, argv, vars=None, desc=""):
+    typ, args, kwargs = splitargs(argv)
+    for i, arg in enumerate(args):
+        args[i] = getarg(arg, vars)
     for name, arg in kwargs.items():
         kwargs[name] = getarg(arg, vars)
     try:
-        fn = getattr(pkg, args[0])(*args[1:], **kwargs)
+        if pkg == torch.nn and hasattr(pkg, "Lazy" + typ):
+            typ = "Lazy" + typ
+        obj = getattr(pkg, typ)(*args, **kwargs)
     except (AttributeError, TypeError) as err:
         raise InvalidConfigError(f"{desc}: {err}")
-    return fn
+    return obj
+
+
+def splitargs(argv):
+    if not isinstance(argv, list) or len(argv) == 0 or not isinstance(argv[0], str):
+        raise InvalidConfigError(f"invalid arg list: {argv}")
+    args = argv.copy()
+    if isinstance(args[-1], dict):
+        kwargs = args.pop().copy()
+    else:
+        kwargs = {}
+    return args[0], args[1:], kwargs
+
+
+def format_args(args, kwargs):
+    return "(" + ",".join([str(x) for x in args]) + ",".join([f"{k}={v}" for k, v in kwargs.items()]) + ")"
 
 
 def getarg(arg, vars):

@@ -78,7 +78,7 @@ class FileLoader(Loader):
         cfg = Config(file=file, rundir=self.rundir)
         self.data = cfg.dataset(self.datadir, "test", device=self.device)
         transform = cfg.transforms()
-        self.model = Model(cfg, device=self.device)
+        self.model = Model(cfg, self.data.image_shape, device=self.device)
         log.debug(f"== {name} model: ==\n{self.model}")
         file = path.join(cfg.dir, "model.pt")
         self.checkpoint = torch.load(file, map_location=self.device)
