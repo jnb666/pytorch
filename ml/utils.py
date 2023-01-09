@@ -75,15 +75,17 @@ def set_seed(seed: int) -> None:
     log.info(f'Set random seed={seed}')
 
 
-def get_module(pkg, argv, vars=None, desc=""):
+def getargs(argv, vars=None):
     typ, args, kwargs = splitargs(argv)
     for i, arg in enumerate(args):
         args[i] = getarg(arg, vars)
     for name, arg in kwargs.items():
         kwargs[name] = getarg(arg, vars)
+    return typ, args, kwargs
+
+
+def get_module(desc, pkg, typ, args, kwargs):
     try:
-        if pkg == torch.nn and hasattr(pkg, "Lazy" + typ):
-            typ = "Lazy" + typ
         obj = getattr(pkg, typ)(*args, **kwargs)
     except (AttributeError, TypeError) as err:
         raise InvalidConfigError(f"{desc}: {err}")
@@ -102,7 +104,7 @@ def splitargs(argv):
 
 
 def format_args(args, kwargs):
-    return "(" + ",".join([str(x) for x in args]) + ",".join([f"{k}={v}" for k, v in kwargs.items()]) + ")"
+    return "(" + ", ".join([str(x) for x in args] + [f"{k}={v}" for k, v in kwargs.items()]) + ")"
 
 
 def getarg(arg, vars):

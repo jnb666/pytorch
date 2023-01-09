@@ -20,10 +20,10 @@ normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 
 [model]
 block = [
-  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same"} ],
+  ["Conv2d", "$nfeat", {kernel_size=3, padding="same"} ],
   ["BatchNorm2d"],
   ["ReLU"],
-  ["Conv2d", {out_channels="$nfeat", kernel_size=3, padding="same"} ],
+  ["Conv2d", "$nfeat", {kernel_size=3, padding="same"} ],
   ["BatchNorm2d"],
   ["ReLU"],
   ["MaxPool2d", 2 ],

@@ -14,7 +14,7 @@ from torch import Tensor, nn
 from .dataset import Dataset
 from .scheduler import StepLRandWeightDecay
 from .utils import (DatasetNotFoundError, InvalidConfigError, get_module,
-                    pformat)
+                    pformat, splitargs)
 
 default_weight_init = {
     "Linear": ["kaiming_normal", {"nonlinearity": "relu"}],
@@ -48,7 +48,13 @@ class Index(tuple):
         else:
             return Index((*self[:-1], self[-1]+1))
 
-    def __str__(self):
+    def format(self) -> str:
+        if len(self) > 0:
+            return "  "*(len(self)-1) + f"{self[-1]:2}"
+        else:
+            return ""
+
+    def __str__(self) -> str:
         return ".".join([str(ix) for ix in self])
 
 
@@ -166,8 +172,9 @@ class Config():
         except KeyError:
             return None
         transform = nn.Sequential()
-        for args in config:
-            transform.append(get_module(K.augmentation, args, desc="transform"))
+        for argv in config:
+            typ, args, kwargs = splitargs(argv)
+            transform.append(get_module("transform", K.augmentation, typ, args, kwargs))
         return transform
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:

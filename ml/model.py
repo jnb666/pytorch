@@ -7,7 +7,7 @@ from torch import Tensor, nn
 
 from .config import Config, Index
 from .utils import (InvalidConfigError, format_args, get_module, getarg,
-                    splitargs)
+                    getargs, splitargs)
 
 
 class Layer(nn.Module):
@@ -24,12 +24,13 @@ class Layer(nn.Module):
         out_shape:torch.Size    output shape - set when containing Model is initialised
     """
 
-    def __init__(self, index: Index, args: list[Any], vars=None):
+    def __init__(self, index: Index, argv: list[Any], vars=None):
         super().__init__()
         self.index = index
-        self.typ = args[0]
         self.out_shape = torch.Size()
-        self.module = get_module(torch.nn, args, vars=vars, desc="model")
+        self.typ, self.args, self.kwargs = getargs(argv, vars)
+        typ = "Lazy" + self.typ if hasattr(torch.nn, "Lazy" + self.typ) else self.typ
+        self.module = get_module("model", torch.nn, typ, self.args, self.kwargs)
         log.debug(f"  {index} {repr(self.module)}")
 
     def forward(self, x: Tensor) -> Tensor:
@@ -51,10 +52,12 @@ class Layer(nn.Module):
         return x
 
     def __str__(self) -> str:
-        s = f"{str(self.index):6}: {self.typ:12}{str(list(self.out_shape)):15}"
         n = num_params(self)
-        s += f"  {n:,} params" if n else ""
-        return s
+        return "{desc:70}{shape:13}{params}".format(
+            desc=self.index.format() + ": " + self.typ + format_args(self.args, self.kwargs),
+            shape=str(list(self.out_shape)),
+            params=f"  {n:,} params" if n else ""
+        )
 
 
 class AddBlock(nn.Module):
@@ -119,11 +122,14 @@ class AddBlock(nn.Module):
             y = self.layers[ix].get_activations(y, layers, res, hist_bins)
         return x + y
 
+    def _format(self, block: list[Index]) -> str:
+        if len(block) == 0:
+            return "[]"
+        layers = [str(self.layers[ix]) for ix in block]
+        return "[\n" + "\n".join(layers) + "\n    ]"
+
     def __str__(self) -> str:
-        s = "[AddBlock]"
-        for ix in self.block1 + self.block2:
-            s += "\n" + str(self.layers[ix])
-        return s
+        return self.index.format() + ": AddBlock(" + self._format(self.block1) + "," + self._format(self.block2) + ")"
 
 
 class Model(nn.Sequential):
@@ -159,17 +165,34 @@ class Model(nn.Sequential):
             except RuntimeError as err:
                 raise InvalidConfigError(f"error building model: {err}")
 
-        self.weight_info: dict[str, str] = {}
+        self._weight_info: dict[str, str] = {}
         if init_weights:
-            self.apply(self._weight_init)
+            self.init_weights()
         self.to(device)
+
+    def init_weights(self) -> None:
+        """Initialise model weights using init function defined in the config"""
+
+        def weight_init(layer: nn.Module):
+            if (isinstance(layer, Model) or isinstance(layer, Layer) or isinstance(layer, AddBlock)
+                    or isinstance(layer, nn.Sequential)):
+                return
+            typ = type(layer).__name__
+            for name, param in layer.named_parameters():
+                init_config = self.config.weight_init if name == "weight" else self.config.bias_init
+                init_parameter(self._weight_info, name, typ, param, init_config)
+
+        self._weight_info.clear()
+        with torch.no_grad():
+            self.apply(weight_init)
+        log.info("== init weights: ==\n" + self.weight_info())
 
     def add(self, index: Index, indexes: list[Index], seq: nn.Sequential, args: list[Any], vars=None) -> Index:
         """Append a new layer or group to the network at index and return the next index """
         if not isinstance(args, list) or len(args) == 0:
             raise InvalidConfigError(f"invalid layer args: {args}")
         defn = self.model_cfg.get(args[0])
-        if defn or args[0] == "AddBlock" or self.model_cfg.get(args[0]):
+        if defn is not None or args[0] == "AddBlock":
             typ, block_args, block_vars = splitargs(args)
             if block_vars:
                 if vars is None:
@@ -180,7 +203,7 @@ class Model(nn.Sequential):
                 adder = AddBlock(self, index, block_args, vars)
                 seq.append(adder)
                 self.layers[index] = adder
-            elif defn and isinstance(defn, list):
+            elif isinstance(defn, list):
                 log.debug(f"[{typ}] {vars}")
                 for item in defn:
                     index = self.add(index, indexes, seq, item, vars)
@@ -214,27 +237,18 @@ class Model(nn.Sequential):
                     x = self.layers[ix].get_activations(x, layers, res, hist_bins)
         return res
 
-    def __str__(self):
-        s = "== model =="
-        total_params = 0
-        for index in self.indexes:
-            m = self.layers[index]
-            s += "\n" + str(m)
-            total_params += num_params(m)
-        s += f"\ntotal parameters: {total_params:,}"
-        for key in sorted(self.weight_info.keys()):
-            s += f"\n{key:20}: {self.weight_info[key]}"
-        return s
+    def weight_info(self) -> str:
+        return "\n".join([f"{key:20}: {self._weight_info[key]}" for key in sorted(self._weight_info.keys())])
 
-    @ torch.no_grad()
-    def _weight_init(self, layer: nn.Module):
-        if (isinstance(layer, Model) or isinstance(layer, Layer) or isinstance(layer, AddBlock)
-                or isinstance(layer, nn.Sequential)):
-            return
-        typ = type(layer).__name__
-        for name, param in layer.named_parameters():
-            init_config = self.config.weight_init if name == "weight" else self.config.bias_init
-            init_parameter(self.weight_info, name, typ, param, init_config)
+    def __str__(self):
+        s = "== model: =="
+        s += f"\n{Index((0,)).format()}: {'Input':66}{str(list(self.input_shape))}"
+        total_params = 0
+        for ix in self.indexes:
+            layer = self.layers[ix]
+            s += "\n" + str(layer)
+            total_params += num_params(layer)
+        return s + f"\ntotal parameters: {total_params:,}"
 
 
 def init_parameter(weight_info, weight_type, layer_type, param, config) -> None:

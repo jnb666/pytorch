@@ -1,0 +1,84 @@
+half = true
+
+[train_data]
+dataset = "CIFAR10"
+train = true
+batch_size = 128
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[test_data]
+dataset = "CIFAR10"
+batch_size = 500
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[model]
+block = [
+  ["Conv2d", "$nout", {kernel_size=1, bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU"],
+  ["Conv2d", "$nout", {kernel_size=3, stride="$stride", padding=1, bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU"],
+  ["Conv2d", "$expand", {kernel_size=1, bias=false}],
+  ["BatchNorm2d"],
+]
+
+shortcut = [
+  ["Conv2d", "$expand", {kernel_size=1, stride="$stride", bias=false}],
+  ["BatchNorm2d"],
+]
+
+empty = []
+
+block1 = [
+  ["AddBlock", "block", "shortcut", {nout="$nout", expand="$expand", stride="$stride"}],
+  ["ReLU"],
+]
+
+block2 = [
+  ["AddBlock", "block", "empty", {nout="$nout", expand="$expand", stride="$stride"}],
+  ["ReLU"],
+]
+
+layers = [
+  ["Conv2d", 64, {kernel_size=3, padding=1, bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU"],
+
+  ["block1", {nout=64, expand=256, stride=1}],
+  ["block2", {nout=64, expand=256, stride=1}],
+  ["block2", {nout=64, expand=256, stride=1}],
+
+  ["block1", {nout=128, expand=512, stride=2}],
+  ["block2", {nout=128, expand=512, stride=1}],
+  ["block2", {nout=128, expand=512, stride=1}],
+  ["block2", {nout=128, expand=512, stride=1}],
+
+  ["block1", {nout=256, expand=1024, stride=2}],
+  ["block2", {nout=256, expand=1024, stride=1}],
+  ["block2", {nout=256, expand=1024, stride=1}],
+  ["block2", {nout=256, expand=1024, stride=1}],
+  ["block2", {nout=256, expand=1024, stride=1}], 
+  ["block2", {nout=256, expand=1024, stride=1}],
+
+  ["block1", {nout=512, expand=2048, stride=2}],
+  ["block2", {nout=512, expand=2048, stride=1}],
+  ["block2", {nout=512, expand=2048, stride=1}],
+
+  ["AvgPool2d", 4],
+  ["Flatten"],
+  ["Linear", 10 ],
+]
+
+[transform]
+transforms = [
+  ["RandomHorizontalFlip"],
+  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
+]
+
+[train]
+optimizer = ["SGD", {lr=0.01, momentum=0.9, nesterov=true, weight_decay=5e-4} ]
+scheduler = ["CosineAnnealingLR", {T_max=200} ]
+epochs = 200
+shuffle = true
+

@@ -1,0 +1,94 @@
+half = true
+
+[train_data]
+dataset = "CIFAR10"
+train = true
+batch_size = 128
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[test_data]
+dataset = "CIFAR10"
+batch_size = 500
+normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
+[model]
+block = [
+  ["Conv2d", "$expand", 1, {bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU"],
+  ["Conv2d", "$expand", 3, {stride="$stride", padding=1, groups="$expand", bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU"],
+  ["Conv2d", "$nout", 1, {bias=false}],
+  ["BatchNorm2d"],
+]
+
+shortcut = [
+  ["Conv2d", "$nout", 1, {stride=1, bias=false}],
+  ["BatchNorm2d"],
+]
+
+empty = []
+
+block1 = [
+  ["AddBlock", "block", "shortcut", {nout="$nout", expand="$expand", stride="$stride"}],
+]
+
+block2 = [
+  ["AddBlock", "block", "empty", {nout="$nout", expand="$expand", stride="$stride"}],
+]
+
+layers = [
+  ["Conv2d", 32, 3, {padding=1, bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU"],
+
+  ["block1", {nout=16, expand=16, stride=1}],
+
+  ["block1", {nout=24, expand=144, stride=1}],
+  ["block2", {nout=24, expand=144, stride=1}],
+
+  ["block",  {nout=32, expand=192, stride=2}],
+  ["block2", {nout=32, expand=192, stride=1}],
+  ["block2", {nout=32, expand=192, stride=1}],
+
+  ["block",  {nout=64, expand=384, stride=2}],
+  ["block2", {nout=64, expand=384, stride=1}],
+  ["block2", {nout=64, expand=384, stride=1}],
+  ["block2", {nout=64, expand=384, stride=1}],
+
+  ["block1", {nout=96, expand=576, stride=1}],
+  ["block2", {nout=96, expand=576, stride=1}],
+  ["block2", {nout=96, expand=576, stride=1}],
+
+  ["block",  {nout=160, expand=960, stride=2}],
+  ["block2", {nout=160, expand=960, stride=1}],
+  ["block2", {nout=160, expand=960, stride=1}],
+
+  ["block1",  {nout=320, expand=1920, stride=1}],
+
+  ["Conv2d", 1280, 1, {bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU"],
+
+  ["AvgPool2d", 4],
+  ["Flatten"],
+  ["Linear", 10],
+]
+
+[weight_init]
+Linear = ["normal", {std=1e-3}]
+Conv2d = ["kaiming_normal", {mode="fan_out", nonlinearity="relu"}]
+
+[transform]
+transforms = [
+  ["RandomHorizontalFlip"],
+  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
+]
+
+[train]
+optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=5e-4} ]
+scheduler = ["CosineAnnealingLR", {T_max=200} ]
+epochs = 200
+shuffle = true
+

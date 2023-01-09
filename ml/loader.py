@@ -78,8 +78,7 @@ class FileLoader(Loader):
         cfg = Config(file=file, rundir=self.rundir)
         self.data = cfg.dataset(self.datadir, "test", device=self.device)
         transform = cfg.transforms()
-        self.model = Model(cfg, self.data.image_shape, device=self.device)
-        log.debug(f"== {name} model: ==\n{self.model}")
+        self.model = Model(cfg, self.data.image_shape, device=self.device, init_weights=True)
         file = path.join(cfg.dir, "model.pt")
         self.checkpoint = torch.load(file, map_location=self.device)
         log.info(f"loaded checkpoint from {file}")
@@ -126,7 +125,7 @@ class DBLoader(Loader):
         cfg = Config(name=name, data=self.db.get_config(name), rundir=self.rundir)
         test_data = cfg.dataset(self.datadir, "test", device=self.device)
         transform = cfg.transforms()
-        model = Model(cfg, test_data.image_shape, device=self.device)
+        model = Model(cfg, test_data.image_shape, device=self.device, init_weights=True)
         return cfg, model, test_data, transform
 
     def load_stats(self, stats: Stats) -> None:

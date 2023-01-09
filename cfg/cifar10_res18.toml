@@ -16,7 +16,7 @@ block = [
   ["Conv2d", "$nout", {kernel_size=3, stride="$stride", padding=1, bias=false}],
   ["BatchNorm2d"],
   ["ReLU"],
-  ["Conv2d", "$nout", {kernel_size=3, stride=1, padding=1, bias=false}],
+  ["Conv2d", "$nout", {kernel_size=3, padding=1, bias=false}],
   ["BatchNorm2d"],
 ]
 
@@ -25,24 +25,35 @@ shortcut = [
   ["BatchNorm2d"],  
 ]
 
-stack = [
-  ["AddBlock", "block", "shortcut", {nout="$nout", stride=2}],
-  ["ReLU"],
-  ["block", {nout="$nout", stride=1}],
+empty = []
+
+block1 = [
+  ["AddBlock", "block", "shortcut", {nout="$nout", stride="$stride"}],
+  ["ReLU"]
+]
+
+block2 = [
+  ["AddBlock", "block", "empty", {nout="$nout", stride="$stride"}],
   ["ReLU"],
 ]
 
 layers = [
-  ["Conv2d", 64, {kernel_size=3, stride=1, padding=1, bias=false}],
+  ["Conv2d", 64, {kernel_size=3, padding=1, bias=false}],
   ["BatchNorm2d"],
   ["ReLU"],
-  ["block", {nout=64, stride=1}],
-  ["ReLU"],
-  ["block", {nout=64, stride=1}],
-  ["ReLU"],
-  ["stack", {nout=128}],
-  ["stack", {nout=256}],
-  ["stack", {nout=512}],
+
+  ["block2", {nout=64, stride=1}],
+  ["block2", {nout=64, stride=1}],
+
+  ["block1", {nout=128, stride=2}],
+  ["block2", {nout=128, stride=1}],
+
+  ["block1", {nout=256, stride=2}],
+  ["block2", {nout=256, stride=1}],
+
+  ["block1", {nout=512, stride=2}],
+  ["block2", {nout=512, stride=1}],
+
   ["AvgPool2d", 4],
   ["Flatten"],
   ["Linear", 10 ],

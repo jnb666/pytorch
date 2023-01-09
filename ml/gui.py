@@ -175,12 +175,13 @@ class MainWindow(qw.QWidget):
             ImageViewer(self),
             Activations(self),
             Histograms(self),
-            ConfigLabel(),
+            ConfigInfo(),
+            ModelInfo(),
         ]
         self.content = qw.QStackedWidget()
         self.menu = qw.QListWidget()
         self.menu.setFixedWidth(menu_width)
-        for i, name in enumerate(["stats", "heatmap", "images", "activations", "histograms", "config"]):
+        for i, name in enumerate(["stats", "heatmap", "images", "activations", "histograms", "config", "model"]):
             self.content.addWidget(self.pages[i])
             self.menu.addItem(list_item(name, center=True, min_height=50))
         self.menu.currentItemChanged.connect(self._select_page)
@@ -293,7 +294,10 @@ class ConfigMenu(qw.QWidget):
         if models != self.models:
             log.debug("update model list")
             model = self.model_select.currentText()
-            self.model_select.currentIndexChanged.disconnect()  # type: ignore
+            try:
+                self.model_select.currentIndexChanged.disconnect()  # type: ignore
+            except RuntimeError as err:
+                log.warning(f"warning: {err}")
             self.model_select.clear()
             self.model_select.addItems(models)
             self.model_select.setCurrentText(model)
@@ -431,12 +435,22 @@ class ConfigLabel(qw.QScrollArea):
         """Update the label text"""
         self.content.setText(f"<pre>{text}</pre>")
 
+    def update_stats(self) -> None:
+        pass
+
+
+class ConfigInfo(ConfigLabel):
+
     def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
         self.set_text(cfg.text)
 
-    def update_stats(self) -> None:
-        pass
+
+class ModelInfo(ConfigLabel):
+
+    def update_config(self, cfg: Config, model: Model) -> None:
+        """Called when new config file is loaded"""
+        self.set_text(str(model) + "\n\n" + model.weight_info() + "\n")
 
 
 class StatsPlots(qw.QWidget):
@@ -1011,6 +1025,9 @@ class Activations(qw.QWidget):
 
     def get_activations(self, layers: list[Index], index: int) -> dict[Index, Tensor]:
         """Get activations tensor for given image"""
+        out_layer = self.layers.indexes[-1]
+        if out_layer not in layers:
+            layers.append(out_layer)
         if not self._activ_cached(layers, index):
             self.activations[index].update(self.main.loader.get_activations(layers, index))
         return self.activations[index]

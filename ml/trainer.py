@@ -182,6 +182,7 @@ class Trainer:
         epochs:int           number of epochs to train for
         shuffle:bool         flag set if data is to be shuffled at start of each epoch
         log_every:int        frequency to log stats to stdout
+        save_every:int       frequency to save checkpoint file
         predict:Tensor       predictions from last test run
         dir:str              directory to save stats and weights
         stopper:Stopper      optional object to check if should stop after this epoch
@@ -193,6 +194,7 @@ class Trainer:
         self.device = device
         self.shuffle = cfg.train.get("shuffle", False)
         self.log_every = int(cfg.train.get("log_every", 1))
+        self.save_every = int(cfg.train.get("save_every", 10))
         self.model = model
         if loss_fn is None:
             self.loss_fn = nn.CrossEntropyLoss()

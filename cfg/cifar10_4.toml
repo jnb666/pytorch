@@ -11,15 +11,15 @@ normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 
 [model]
 layers = [
-  ["Conv2d", {out_channels=32, kernel_size=3, padding="same"} ],
+  ["Conv2d", 32, {kernel_size=3, padding="same"} ],
   ["ReLU"],
-  ["Conv2d", {out_channels=32, kernel_size=3} ],
+  ["Conv2d", 32, {kernel_size=3} ],
   ["ReLU"],
   ["MaxPool2d", 2 ],
   ["Dropout", 0.25 ],
-  ["Conv2d", {out_channels=64, kernel_size=3, padding="same"} ],
+  ["Conv2d", 64, {kernel_size=3, padding="same"} ],
   ["ReLU"],
-  ["Conv2d", {out_channels=64, kernel_size=3} ],
+  ["Conv2d", 64, {kernel_size=3} ],
   ["ReLU"],
   ["MaxPool2d", 2 ],
   ["Dropout", 0.25 ],

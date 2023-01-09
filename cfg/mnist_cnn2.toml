@@ -19,9 +19,9 @@ normalize = [[0.1307], [0.3081]]
 
 [model]
 layers = [
-  ["Conv2d", {out_channels=32, kernel_size=5} ],
+  ["Conv2d", 32, {kernel_size=5} ],
   ["MaxPool2d", 2 ],
-  ["Conv2d", {out_channels=64, kernel_size=5} ],
+  ["Conv2d", 64, {kernel_size=5} ],
   ["MaxPool2d", 2 ],
   ["Flatten"],
   ["Linear", 1024 ],

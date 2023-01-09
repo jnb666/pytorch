@@ -20,7 +20,7 @@ normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 
 [model]
 conv = [
-  ["Conv2d", {out_channels="$nfeat", kernel_size="$size", padding="same", bias=false} ],
+  ["Conv2d", "$nfeat", {kernel_size="$size", padding="same", bias=false} ],
   ["BatchNorm2d"],
   ["ReLU"], 
 ]
@@ -57,7 +57,7 @@ transforms = [
 
 [train]
 optimizer = ["Adam", {lr=0.002, weight_decay=1e-5} ]
-scheduler = ["CosineAnnealingLR", {T_max=100} ]
+scheduler = ["CosineAnnealingLR", {T_max=75} ]
 stop = {epochs=2, extra=4, avg=12}
-epochs = 60
+epochs = 75
 shuffle = true

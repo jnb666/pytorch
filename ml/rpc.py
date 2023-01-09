@@ -29,6 +29,7 @@ class BaseContext:
         self.trainer: Trainer | None = None
         self.ds: Datasets | None = None
         self.cfg: Config | None = None
+        self.model: Model | None = None
         self.stats = Stats()
         self.epochs: list[int] = []
 
@@ -36,39 +37,31 @@ class BaseContext:
     def epoch(self) -> int:
         return self.stats.current_epoch
 
-    @property
-    def log_every(self) -> int:
-        if self.trainer:
-            return self.trainer.log_every
-        return 0
-
     def load_config(self, cfg: Config) -> None:
         set_logdir(cfg.dir)
-        # log.debug(cfg)
         device = "cuda" if self.device == "cuda" else "cpu"
         dtype = torch.float16 if cfg.half else torch.float32
         self.cfg = cfg
         self.ds = Datasets(cfg, self.args.datadir, device=device, dtype=dtype)
+        self.model = Model(self.cfg, self.ds.train_data.image_shape, device=self.device)
+        log.info(str(self.model))
 
     def restart(self, clear_files: bool = False) -> bool:
-        if not self.cfg or not self.ds:
+        if not self.cfg or not self.ds or not self.model:
             return False
         self.cfg.save(clear=clear_files)
         set_seed(self.cfg.seed)
-        model = Model(self.cfg, self.ds.train_data.image_shape, device=self.device, init_weights=True)
-        log.info(model)
-        self.trainer = Trainer(self.cfg, model, device=self.device)
+        self.model.init_weights()
+        self.trainer = Trainer(self.cfg, self.model, device=self.device)
         self.stats = Stats()
         self.stats.xrange = [1, self.trainer.epochs]
         return True
 
     def resume(self, epoch: int) -> bool:
-        if not self.cfg or not self.ds:
+        if not self.cfg or not self.ds or not self.model:
             return False
         self.cfg.save()
-        model = Model(self.cfg, self.ds.train_data.image_shape, device=self.device)
-        log.info(model)
-        self.trainer = Trainer(self.cfg, model, device=self.device)
+        self.trainer = Trainer(self.cfg, self.model, device=self.device)
         self.stats = self.trainer.resume_from(epoch)
         if self.stats.current_epoch != epoch:
             return False
@@ -98,16 +91,14 @@ class BaseContext:
                           test_accuracy, valid_loss, valid_accuracy)
         stop = self.trainer.should_stop(self.stats)
         self.stats.running = not stop
-
         self.trainer.step(self.stats)
 
-        if stop or (self.epoch % self.log_every == 0):
-            self.trainer.save(self.stats)
+        if stop or (self.epoch % self.trainer.log_every == 0):
             log.info(str(self.stats))
-
-        if stop or (self.epoch % (10*self.log_every) == 0):
+        if stop or (self.epoch % self.trainer.save_every == 0):
+            self.trainer.save(self.stats)
+        if stop or (self.epoch % (10*self.trainer.log_every) == 0):
             log.info(f"  Elapsed time = {self.stats.elapsed_total()}")
-
         if stop:
             self.epochs = clear_checkpoints(self.epoch, self.trainer.cfg.dir)
         return stop
