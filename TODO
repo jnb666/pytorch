@@ -2,12 +2,10 @@ TODO
 ====
 - check repeatable runs
 
-- CPU and memory profiling
-
 - hyperparameter tuning?
 
 - redis DB schema
-    config         hash{"name": "config TOML", ...}          - all available models - updated on server startup / inotify
+    config         hash{"name:version": "config TOML", ...}  - all available models - updated on server startup / inotify
     state          json(State)                               - current model, epoch, epochs and run state
     stats          string(saved(stats.state_dict()))         - training stats - updated on load and after each epoch
     activations    hash{"layer:index": saved(Tensor)}        - activations for given layer and entry from test dataset

@@ -6,6 +6,7 @@ import os
 import pickle
 import platform
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import reduce
 from os import path
@@ -39,7 +40,7 @@ tiny_font_size = 9 if platform.system() == "Linux" else 11
 bgcolor = "#111"
 menu_bgcolor = "#333"
 fgcolor = "w"
-spacing = 15
+spacing = 10
 margins = 4
 menu_width = 120
 layers_width = 180
@@ -114,18 +115,16 @@ class MainWindow(qw.QWidget):
         epochs:int                  estimated number of epochs
     """
 
-    def __init__(self, loader: Loader, sender: Callable | None = None, model: str = "", running: bool = False):
+    def __init__(self, loader: Loader, sender: Callable | None = None, running: bool = False):
         super().__init__()
-        log.debug(f"new MainWindow: model={model}")
         self.cfg: Config | None = None
         self.model: Model | None = None
         self.data: Dataset | None = None
         self.stats = Stats()
         self.predict = None
         self.opts = get_options()
-        # pprint(self.opts)
         self.loader = loader
-        self.cfg_menu = ConfigMenu(self, model, sender)
+        self.cfg_menu = ConfigMenu(self, sender)
         self.img_menu = ImageMenu(self.opts)
         self.img_menu.hide()
         self._build()
@@ -142,6 +141,7 @@ class MainWindow(qw.QWidget):
         cols.addLayout(rows)
         self.setLayout(cols)
         self._set_size()
+        log.debug("MainWindow __init__ complete")
 
     @property
     def epochs(self):
@@ -169,47 +169,48 @@ class MainWindow(qw.QWidget):
         self.opts.save()
 
     def _build(self):
-        self.pages = [
-            StatsPlots(self),
-            Heatmap(self),
-            ImageViewer(self),
-            Activations(self),
-            Histograms(self),
-            ConfigInfo(),
-            ModelInfo(),
-        ]
+        self.pages = OrderedDict()
+        self.pages["stats"] = StatsPlots(self)
+        self.pages["heatmap"] = Heatmap(self)
+        self.pages["images"] = ImageViewer(self)
+        self.pages["activations"] = Activations(self)
+        self.pages["histograms"] = Histograms(self)
+        self.pages["model"] = ModelInfo()
+        self.pages["config"] = ConfigInfo()
         self.content = qw.QStackedWidget()
         self.menu = qw.QListWidget()
         self.menu.setFixedWidth(menu_width)
-        for i, name in enumerate(["stats", "heatmap", "images", "activations", "histograms", "config", "model"]):
-            self.content.addWidget(self.pages[i])
+        for name in self.pages.keys():
+            self.content.addWidget(self.pages[name])
             self.menu.addItem(list_item(name, center=True, min_height=50))
         self.menu.currentItemChanged.connect(self._select_page)
         self.menu.setCurrentRow(0)
 
-    def update_config(self, name: str, running: bool = False) -> None:
+    def update_config(self, name: str, version: str = "", running: bool = False) -> None:
         """Load new model definition"""
-        log.debug(f"load_config: {name}")
+        log.debug(f"update_config: {name} version={version} running={running}")
         try:
-            self.cfg, self.model, self.data, self.transform = self.loader.load_config(name)
+            self.cfg, self.model, self.data, self.transform = self.loader.load_config(name, version)
         except (InvalidConfigError, FileNotFoundError) as err:
             self.set_error(str(err))
             return
+        log.debug(f"loaded config: {self.cfg.name} version={self.cfg.version}")
         self.setWindowTitle(f"{self.cfg.name} v{self.cfg.version}")
+        self.cfg_menu.update_config(self.cfg, self.stats)
         self.img_menu.set_classes(self.data.classes)
-        for page in self.pages:
+        for page in self.pages.values():
             page.update_config(self.cfg, self.model)
         self.data.reset()
         self.img_menu.update_config(self.cfg)
-        self.cfg_menu.update_config(self.cfg, self.stats, self.loader.get_models())
         self.update_stats()
 
     def set_error(self, err: str) -> None:
         log.error(f"set_error: {err}")
         self.cfg_menu.set_error(err)
         name = self.cfg_menu.model_select.currentText()
-        data = self.loader.load_model(name)
-        self.pages[-1].set_text(data)
+        version = self.cfg_menu.version_select.currentText()
+        data = self.loader.load_model(name, version)
+        self.pages["config"].set_text(data)
 
     def update_stats(self) -> None:
         """Refresh GUI with updated stats and model weights"""
@@ -219,8 +220,8 @@ class MainWindow(qw.QWidget):
         self.cfg_menu.update_stats(self.stats)
         if len(self.stats.predict):
             self.predict = torch.clone(self.stats.predict)
-        index = self.content.currentIndex()
-        self.pages[index].update_stats()
+        name = self.menu.currentItem().text()
+        self.pages[name].update_stats()
         log.debug(f"updated stats: {self.cfg.name} epoch={self.stats.current_epoch} running={self.stats.running}")
 
     def _select_page(self, item):
@@ -228,25 +229,29 @@ class MainWindow(qw.QWidget):
         index = self.menu.indexFromItem(item).row()
         log.debug(f"select page {index}: {name}")
         if name == "activations" or name == "images":
-            self.img_menu.register(self.pages[index])
+            self.img_menu.register(self.pages[name])
         else:
             self.img_menu.register(None)
         self.content.setCurrentIndex(index)
-        self.pages[index].update_stats()
+        self.pages[name].update_stats()
 
 
 class ConfigMenu(qw.QWidget):
     """Main top menu bar"""
 
-    def __init__(self, main: MainWindow, model: str = "", sender: Callable | None = None):
+    def __init__(self, main: MainWindow, sender: Callable | None = None):
         super().__init__()
         set_background(self, menu_bgcolor)
+        self.loader = main.loader
         self.cmd_menu = CommandMenu(main, sender)
-        self.models = main.loader.get_models()
+
+        self.models = self.loader.get_models()
         self.model_select = qw.QComboBox()
-        self.model_select.addItems(self.models)
-        self.model_select.setCurrentText(model)
+        self.version_select = qw.QComboBox()
+        self.model_select.addItems(["select model"] + [name for name, _ in self.models])
         self.model_select.currentIndexChanged.connect(self._select_model)  # type: ignore
+        self.version_select.currentIndexChanged.connect(self._select_model)  # type: ignore
+
         self._error_label = qw.QLabel()
         self._errors = self._error_box(self._error_label)
         self._errors.hide()
@@ -257,6 +262,7 @@ class ConfigMenu(qw.QWidget):
         cols.setContentsMargins(margins, margins, margins, margins)
         cols.addSpacing(spacing)
         cols.addWidget(self.model_select)
+        cols.addWidget(self.version_select)
         cols.addSpacing(spacing)
         cols.addWidget(self.cmd_menu)
         cols.addWidget(self._errors)
@@ -266,14 +272,10 @@ class ConfigMenu(qw.QWidget):
 
     def set_error(self, err: str) -> None:
         self._error_label.setText(err)
-        if err:
-            self.cmd_menu.hide()
-            self._stretch.hide()
-            self._errors.show()
-        else:
-            self._errors.hide()
-            self.cmd_menu.show()
-            self._stretch.show()
+        in_error = (err != "")
+        self._errors.setVisible(in_error)
+        self.cmd_menu.setVisible(not in_error)
+        self._stretch.setVisible(not in_error)
 
     def _error_box(self, label):
         # force error label to expand to use all available space without resizing the window
@@ -289,19 +291,9 @@ class ConfigMenu(qw.QWidget):
         scroll.setFixedHeight(label.height()+2*margins)
         return scroll
 
-    def update_config(self, cfg: Config, stats: Stats, models: list[str]) -> None:
+    def update_config(self, cfg: Config, stats: Stats) -> None:
         """Called when new config file is loaded or config files are changed"""
-        if models != self.models:
-            log.debug("update model list")
-            model = self.model_select.currentText()
-            try:
-                self.model_select.currentIndexChanged.disconnect()  # type: ignore
-            except RuntimeError as err:
-                log.warning(f"warning: {err}")
-            self.model_select.clear()
-            self.model_select.addItems(models)
-            self.model_select.setCurrentText(model)
-            self.model_select.currentIndexChanged.connect(self.cmd_menu.select_model)  # type: ignore
+        self._update_model_select(cfg.name, cfg.version)
         self.cmd_menu.update_config(cfg, stats)
         self.set_error("")
 
@@ -312,9 +304,42 @@ class ConfigMenu(qw.QWidget):
         self.cmd_menu.update_stats(stats)
         self.set_error("")
 
+    def _update_model_select(self, model: str, version: str) -> None:
+        self.models = self.loader.get_models()
+        log.debug(f"update model select: model={model} version={version}")
+        disconnect_signal(self.model_select.currentIndexChanged)  # type: ignore
+        self.model_select.clear()
+        self.model_select.addItems(["select model"] + [name for name, _ in self.models])
+        self.model_select.setCurrentText(model)
+        self._update_version_select(model, version)
+        self.model_select.currentIndexChanged.connect(self._select_model)  # type: ignore
+
+    def _update_version_select(self, model: str, version: str) -> None:
+        versions = get_versions(self.models, model)
+        log.debug(f"update version select: mode={model} version={version} of {versions}")
+        disconnect_signal(self.version_select.currentIndexChanged)  # type: ignore
+        self.version_select.clear()
+        self.version_select.addItems(versions)
+        self.version_select.setCurrentText(version)
+        self.version_select.currentIndexChanged.connect(self._select_version)  # type: ignore
+
     def _select_model(self, index):
-        name = self.model_select.itemText(index)
-        self.cmd_menu.model_loader(name)()
+        if index == 0:
+            return
+        model = self.model_select.currentText()
+        version = self.version_select.currentText()
+        log.debug(f"select model: {model} version={version}")
+        versions = get_versions(self.models, model)
+        if version in versions:
+            self.cmd_menu.load_model(model, version)
+        elif len(versions):
+            self.version_select.setCurrentText(versions[0])
+
+    def _select_version(self, index):
+        model = self.model_select.currentText()
+        version = self.version_select.currentText()
+        log.debug(f"select version: {model} version={version}")
+        self.cmd_menu.load_model(model, version)
 
 
 class CommandMenu(qw.QWidget):
@@ -335,15 +360,15 @@ class CommandMenu(qw.QWidget):
         self._learn_rate = qw.QLabel()
         if self.send:
             self.start = qw.QPushButton("start")
-            self.start.setEnabled(False)
+            self.start.hide()
             self.start.clicked.connect(lambda: self.send("start", 0, False))  # type: ignore
             self.stop = qw.QPushButton("stop")
-            self.stop.setEnabled(False)
+            self.stop.hide()
             self.stop.clicked.connect(lambda: self.send("pause", True))  # type: ignore
             self.resume_from = qw.QComboBox()
             self.resume_from.setMinimumWidth(60)
             self.resume = qw.QPushButton("resume")
-            self.resume.setEnabled(False)
+            self.resume.hide()
             self.resume.clicked.connect(self._resume)  # type: ignore
             self.max_epoch = qw.QLineEdit()
             self.max_epoch.setFixedWidth(50)
@@ -375,9 +400,9 @@ class CommandMenu(qw.QWidget):
         if self.send:
             self._update_epoch_list(stats.current_epoch)
             self.max_epoch.setText(str(cfg.epochs))
-            self.start.setEnabled(True)
-            self.resume.setEnabled(True)
-            self.stop.setEnabled(False)
+            self.start.show()
+            self.resume.show()
+            self.stop.hide()
 
     def update_stats(self, stats: Stats) -> None:
         """Called after loading config and after each epoch"""
@@ -386,9 +411,9 @@ class CommandMenu(qw.QWidget):
         if len(stats.learning_rate):
             self._learn_rate.setText(f"lr: {stats.learning_rate[-1]:.4}")
         if self.send:
-            self.start.setEnabled(not stats.running)
-            self.resume.setEnabled(not stats.running)
-            self.stop.setEnabled(stats.running)
+            self.start.setVisible(not stats.running)
+            self.resume.setVisible(not stats.running)
+            self.stop.setVisible(stats.running)
             if not stats.running:
                 self._update_epoch_list(stats.current_epoch)
 
@@ -405,14 +430,11 @@ class CommandMenu(qw.QWidget):
         else:
             self.send("start", epoch, False)
 
-    def model_loader(self, name):
+    def load_model(self, name, version):
         if self.send:
-            def loader():
-                self.send("load", name)
+            self.send("load", name, version)
         else:
-            def loader():
-                self.main.update_config(name)
-        return loader
+            self.main.update_config(name, version)
 
 
 class ConfigLabel(qw.QScrollArea):
@@ -463,9 +485,10 @@ class StatsPlots(qw.QWidget):
     def __init__(self, main: MainWindow):
         super().__init__()
         self.main = main
+        self.columns = 0
         self.table = pg.TableWidget(editable=False, sortable=False)
-        self.table.setSizePolicy(qw.QSizePolicy.Expanding, qw.QSizePolicy.Preferred)  # type: ignore
         self.plots = pg.GraphicsLayoutWidget(border=True)
+        self.plots.setSizePolicy(qw.QSizePolicy.Expanding, qw.QSizePolicy.Preferred)  # type: ignore
         self._draw_plots()
         cols = qw.QHBoxLayout()
         cols.setContentsMargins(0, 0, 0, 0)
@@ -528,11 +551,17 @@ class StatsPlots(qw.QWidget):
         if len(stats.valid_loss):
             self.table.setFormat("%.3f", column=3)
             self.table.setFormat("%.1f", column=4)
-        data = stats.table_data()
-        data.reverse()
         cols = [(name, float) for name in stats.table_columns()]
-        self.table.setData(np.array(data, dtype=cols))
-        self.table.setVerticalHeaderLabels([str(i) for i in reversed(stats.epoch)])
+        data = stats.table_data()
+        if len(data) == 0:
+            self.table.setData(np.array([(0, 0, 0)], dtype=cols))
+        else:
+            data.reverse()
+            self.table.setData(np.array(data, dtype=cols))
+            self.table.setVerticalHeaderLabels([str(i) for i in reversed(stats.epoch)])
+        if self.columns != len(cols) and len(data) > 0:
+            self.columns = len(cols)
+            self.table.updateGeometry()
 
     def update_config(self, cfg: Config, model: Model) -> None:
         """Called when new config file is loaded"""
@@ -594,6 +623,8 @@ class Heatmap(pg.GraphicsLayoutWidget):
             return
         targets = self.main.data.targets.cpu().numpy()
         predict = np.array(self.main.predict.cpu())
+        if len(targets) != len(predict):
+            return
         classes = self.main.data.classes
         map, _, _ = np.histogram2d(targets, predict, bins=len(classes))
         log.debug(f"== heatmap: ==\nclasses={classes}\n{map}")
@@ -681,10 +712,7 @@ class ImageMenu(qw.QWidget):
     def register(self, listener) -> None:
         """Called when a new content page is loaded to reset the callbacks"""
         self._listener = listener
-        if listener:
-            self.show()
-        else:
-            self.hide()
+        self.setVisible(listener is not None)
 
     def _prev(self):
         if self._listener is not None:
@@ -914,7 +942,7 @@ class Histograms(qw.QWidget):
             self.main.opts.histogram_layers[cfg.name] = enabled
             self.main.opts.save()
         self.layers.set_layers(names, enabled)
-        log.debug(f"init histogram layers: {names} {enabled}")
+        log.debug(f"init histogram layers: {[str(ix)+':'+name for ix, name in names]} {[str(ix) for ix in enabled]}")
 
     def _select_layer(self, item):
         selected = self.layers.selected()
@@ -1012,7 +1040,7 @@ class Activations(qw.QWidget):
                     enabled.append(ix)
             self.main.opts.activation_layers[cfg.name] = enabled
             self.main.opts.save()
-        log.debug(f"init activation layers: {names} {enabled}")
+        log.debug(f"init activation layers: {[str(ix)+':'+name for ix, name in names]} {[str(ix) for ix in enabled]}")
         self.layers.set_layers(names, enabled)
         self.index = self.main.opts.activation_index.get(cfg.name, 0)
 
@@ -1607,3 +1635,17 @@ def to_image(data: Tensor) -> np.ndarray:
     if c == 3 or c == 4:
         return img[0].transpose((1, 2, 0))
     raise ValueError(f"Invalid data shape for image: {data.shape}")
+
+
+def disconnect_signal(signal):
+    try:
+        signal.disconnect()
+    except RuntimeError as err:
+        log.warning(f"warning: {err}")
+
+
+def get_versions(models, model):
+    for name, versions in models:
+        if name == model:
+            return versions
+    return []

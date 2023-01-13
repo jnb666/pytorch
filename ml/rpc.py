@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from argparse import Namespace
+from dataclasses import dataclass
 from glob import glob
 from os import path
 from typing import Callable
@@ -13,11 +14,24 @@ from torch import nn
 
 from .config import Config, Index
 from .database import Database, State
+from .dataset import DataLoader, Dataset, Transforms
 from .model import Model
-from .trainer import Datasets, Stats, Trainer
-from .utils import InvalidConfigError, RunInterrupted, set_logdir, set_seed
+from .trainer import Stats, Trainer
+from .utils import (InvalidConfigError, RunInterrupted, load_checkpoint,
+                    set_logdir, set_seed)
 
 zmq_port = 5555
+
+
+@dataclass
+class Data:
+    cfg: Config
+    model: Model
+    loader: DataLoader
+    train: Dataset
+    test: Dataset
+    valid: Dataset | None
+    transform: Transforms | None
 
 
 class BaseContext:
@@ -26,63 +40,79 @@ class BaseContext:
     def __init__(self, args: Namespace, device: str):
         self.args = args
         self.device = device
+        self.data: Data | None = None
         self.trainer: Trainer | None = None
-        self.ds: Datasets | None = None
-        self.cfg: Config | None = None
-        self.model: Model | None = None
         self.stats = Stats()
         self.epochs: list[int] = []
+
+    @property
+    def cfg(self) -> Config:
+        if self.data:
+            return self.data.cfg
+        raise ValueError("config not loaded")
 
     @property
     def epoch(self) -> int:
         return self.stats.current_epoch
 
-    def load_config(self, cfg: Config) -> None:
+    def load_config(self, cfg: Config, verbose: bool = False) -> None:
         set_logdir(cfg.dir)
-        device = "cuda" if self.device == "cuda" else "cpu"
-        dtype = torch.float16 if cfg.half else torch.float32
-        self.cfg = cfg
-        self.ds = Datasets(cfg, self.args.datadir, device=device, dtype=dtype)
-        self.model = Model(self.cfg, self.ds.train_data.image_shape, device=self.device)
-        log.info(str(self.model))
+        train_data = cfg.dataset(self.args.datadir, "train")
+        log.info(f"== train data: ==\n{train_data}")
+        test_data = cfg.dataset(self.args.datadir, "test", device=self.device)
+        log.info(f"== test data: ==\n{test_data}")
+        if cfg.data("valid"):
+            valid_data = cfg.dataset(self.args.datadir, "valid", device=self.device)
+            log.info(f"== valid data: ==\n{valid_data}")
+        else:
+            valid_data = None
+        transforms = cfg.transforms("train")
+        if transforms is not None:
+            log.info(f"== transforms: ==\n{transforms}")
+        loader = DataLoader(pin_memory=True)
+        model = Model(cfg, test_data.image_shape, device=self.device)
+        if verbose:
+            log.info(str(model))
+        self.data = Data(cfg, model, loader, train_data, test_data, valid_data, transforms)
 
     def restart(self, clear_files: bool = False) -> bool:
-        if not self.cfg or not self.ds or not self.model:
+        if not self.data:
             return False
         self.cfg.save(clear=clear_files)
         set_seed(self.cfg.seed)
-        self.model.init_weights()
-        self.trainer = Trainer(self.cfg, self.model, device=self.device)
+        self.data.model.init_weights()
+        self.trainer = Trainer(self.cfg, self.data.model, device=self.device)
         self.stats = Stats()
         self.stats.xrange = [1, self.trainer.epochs]
+        self.data.loader.start(self.data.train, self.cfg.shuffle(), self.data.transform, seed=self.cfg.seed)
         return True
 
     def resume(self, epoch: int) -> bool:
-        if not self.cfg or not self.ds or not self.model:
+        if not self.data:
             return False
         self.cfg.save()
-        self.trainer = Trainer(self.cfg, self.model, device=self.device)
+        self.trainer = Trainer(self.cfg, self.data.model, device=self.device)
         self.stats = self.trainer.resume_from(epoch)
         if self.stats.current_epoch != epoch:
-            return False
-        if self.trainer.stopper:
-            self.trainer.stopper.update_stats(self.stats)
+            raise RuntimeError(f"invalid checkpoint: epoch is {self.stats.current_epoch} - expected {epoch}")
+        # TODO load saved seed in inloader
+        self.data.loader.start(self.data.train, self.cfg.shuffle(), self.data.transform)
         return True
 
-    def do_epoch(self, should_stop: Callable[[], bool] | None = None) -> bool:
+    def do_epoch(self, should_stop: Callable | None = None) -> bool:
         """Returns true if run should stop"""
-        if not self.trainer or not self.ds:
-            log.error("Error: cannot step to next epoch - run not started")
+        if not self.trainer or not self.data:
             return True
-
         try:
-            train_loss = self.trainer.train(self.ds.train_data, self.ds.transform, should_stop=should_stop)
-            if self.ds.valid_data is not None:
-                valid_loss, valid_accuracy = self.trainer.test(self.ds.valid_data, should_stop=should_stop)
+            train_loss = self.trainer.train(self.data.loader, should_stop=should_stop)
+            if self.data.valid:
+                valid_loss, valid_accuracy = self.trainer.test(self.data.valid, should_stop=should_stop)
             else:
                 valid_loss, valid_accuracy = None, None
-            test_loss, test_accuracy = self.trainer.test(self.ds.test_data, should_stop=should_stop)
+            test_loss, test_accuracy = self.trainer.test(self.data.test, should_stop=should_stop)
         except RunInterrupted:
+            self.data.loader.shutdown()
+            self.trainer.save(self.stats)
             return True
 
         self.stats.current_epoch += 1
@@ -100,34 +130,39 @@ class BaseContext:
         if stop or (self.epoch % (10*self.trainer.log_every) == 0):
             log.info(f"  Elapsed time = {self.stats.elapsed_total()}")
         if stop:
-            self.epochs = clear_checkpoints(self.epoch, self.trainer.cfg.dir)
+            self.data.loader.shutdown()
+            self.epochs = clear_checkpoints(self.epoch, self.cfg.dir)
         return stop
 
-    def run(self) -> None:
+    def run(self, profile=None) -> None:
         raise NotImplementedError("abstract method")
 
 
 class CmdContext(BaseContext):
     """CmdContext class is used to manage a command line training run"""
 
-    def run(self) -> None:
+    def run(self, profile=None) -> None:
         try:
             cfg = Config(file=self.args.config, rundir=self.args.rundir, epochs=self.args.epochs, seed=self.args.seed)
-            self.load_config(cfg)
-        except InvalidConfigError as err:
-            print(f"Error: config file '{self.args.config}': {err}")
+            self.load_config(cfg, verbose=True)
+        except (InvalidConfigError, FileNotFoundError) as err:
+            print(f"error in config file '{self.args.config}': {err}")
             sys.exit(1)
         try:
             if self.args.resume:
                 self.resume(self.args.resume)
             else:
-                self.restart(clear_files=self.args.clear)
-        except FileNotFoundError as err:
-            print(f"Resume file not found: {err}")
+                self.restart(self.args.clear)
+        except InvalidConfigError as err:
+            print(f"error in config file '{self.args.config}': {err}")
+            sys.exit(1)
+        except (FileNotFoundError, RuntimeError, KeyError) as err:
+            log.error(f"error loading state from checkpoint: {err}")
             sys.exit(1)
 
         while not self.do_epoch():
-            pass
+            if profile:
+                profile.step()
 
 
 class Server(BaseContext):
@@ -143,7 +178,7 @@ class Server(BaseContext):
         self.paused = True
         self.started = False
 
-    def run(self) -> None:
+    def run(self, profile=None) -> None:
         while True:
             self.get_command()
             if self.started and not self.paused:
@@ -152,13 +187,13 @@ class Server(BaseContext):
                     self.paused = True
                 self.db.update(self.stats, clear=self.stats.running, epochs=self.epochs)
 
-    def load(self, name: str) -> None:
-        log.info(f"cmd: load {name}")
+    def load(self, name: str, version: str) -> None:
+        log.info(f"cmd: load {name} version={version}")
         try:
-            data = self.db.get_config(name)
-            cfg = Config(name=name, data=data, rundir=self.args.rundir, seed=self.args.seed)
+            config = self.db.get_config(name, version)
+            cfg = Config(name=name, data=config, rundir=self.args.rundir, seed=self.args.seed)
             self.load_config(cfg)
-            self.stats = self.db.set_model(name, cfg.dir, cfg.epochs)
+            self.stats = self.db.set_model(cfg)
             self.ok()
         except InvalidConfigError as err:
             state = State(name=name, error=str(err))
@@ -174,7 +209,7 @@ class Server(BaseContext):
                 self.started = self.restart(clear)
             else:
                 self.started = self.resume(epoch)
-        except (FileNotFoundError, InvalidConfigError) as err:
+        except (FileNotFoundError, RuntimeError, KeyError, InvalidConfigError) as err:
             self.error(str(err))
             return
         if self.started:
@@ -187,7 +222,7 @@ class Server(BaseContext):
 
     def set_max_epoch(self, epoch: int) -> None:
         log.info(f"cmd: max_epoch {epoch}")
-        if self.cfg:
+        if self.data:
             self.cfg.epochs = epoch
             self.stats.xrange = [0, epoch]
             self.db.update(self.stats)
@@ -196,12 +231,13 @@ class Server(BaseContext):
             self.error("config not loaded")
 
     def pause(self, on: bool) -> None:
-        if on or self.started:
-            log.info(f"cmd: pause {on}")
-            self.paused = on
-            if self.started and self.trainer and self.trainer.stopper:
-                self.trainer.stopper.update_stats(self.stats)
-            self.db.set_running(not on)
+        if on:
+            log.info(f"cmd: pause")
+            if self.started:
+                self.paused = True
+                if self.trainer and self.trainer.stopper:
+                    self.trainer.stopper.update_stats(self.stats)
+                self.db.set_running(not on)
             self.ok()
         else:
             state = self.db.get_state()
@@ -210,37 +246,38 @@ class Server(BaseContext):
     def get_model(self) -> Model | None:
         if self.started and self.trainer:
             return self.trainer.model
-        if not self.cfg or not self.ds or self.stats.current_epoch < 1:
+        if not self.data:
             return None
-        model = Model(self.cfg, self.ds.train_data.image_shape, device=self.device)
-        trainer = Trainer(self.cfg, model, device=self.device)
-        stats = trainer.resume_from(self.stats.current_epoch)
-        if stats.current_epoch == self.stats.current_epoch:
-            return model
-        return None
+        model = Model(self.cfg, self.data.test.image_shape, device=self.device)
+        try:
+            checkpoint = load_checkpoint(self.cfg.dir, device=self.device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+        except FileNotFoundError:
+            model.init_weights()
+        return model
 
-    def get_activations(self, name: str, layers: list[Index], index: int = 0, hist_bins: int = 0) -> None:
+    def get_activations(self, name: str, layers: list[Index], index: int = 0, hist_bins: int = 0,
+                        train: bool = False) -> None:
         log.debug(f"cmd: {name} {layers} {index} hist_bins={hist_bins}")
         model = self.get_model()
-        if not self.ds or not model:
+        if not self.data or not model:
             self.error("config not loaded")
             return
-        test_data = self.ds.test_data
         if name == "ml:activations":
-            input = test_data.data[index:index+1]
+            input = self.data.test.data[index:index+1]
         else:
-            input = test_data.data[:test_data.batch_size]
+            input = self.data.test[0][0]
         layers = [Index(i) for i in layers]
         activations = model.activations(input, layers, hist_bins=hist_bins)
         for layer, val in activations.items():
-            key = str(layer)
-            if name == "ml:activations":
-                key += f":{index}"
+            key = f"{layer}:{index}" if name == "ml:activations" else f"{layer}"
             log.debug(f"save {name} {key}")
             self.db.save(val, name, key)
+        if train and self.started and self.trainer:
+            self.trainer.model.train()
         self.ok()
 
-    def get_command(self) -> bool:
+    def get_command(self, train=False) -> bool:
         """Poll for command on 0MQ socket - returns True if run should stop"""
         if self.paused or not self.started:
             cmd = self.socket.recv_json()
@@ -250,8 +287,8 @@ class Server(BaseContext):
             except zmq.ZMQError:
                 return not self.started or self.paused
         match cmd:
-            case ["load", str(name)]:
-                self.load(name)
+            case ["load", str(name), str(version)]:
+                self.load(name, version)
             case ["start", int(epoch), bool(clear)]:
                 self.start(epoch, clear)
             case ["max_epoch", int(epoch)]:
@@ -259,9 +296,9 @@ class Server(BaseContext):
             case ["pause", bool(on)]:
                 self.pause(on)
             case ["activations", list(layers), int(index)]:
-                self.get_activations("ml:activations", layers, index)
+                self.get_activations("ml:activations", layers, index, train=train)
             case ["histograms", list(layers)]:
-                self.get_activations("ml:histograms", layers, hist_bins=100)
+                self.get_activations("ml:histograms", layers, hist_bins=100, train=train)
             case _:
                 self.error(f"invalid command: {cmd}")
         return not self.started or self.paused
@@ -305,13 +342,19 @@ class Client:
 
 def clear_checkpoints(last_epoch: int, dir: str) -> list[int]:
     """Remove old checkpoint files from previous runs and return current epoch list"""
+    config_file = path.join(dir, "config.toml")
+    try:
+        start_time = path.getmtime(config_file)
+    except OSError:
+        log.warning(f"warning: error reading {config_file} - skip purge of checkpoint files")
+        start_time = 0
     epochs = []
     for file in glob(path.join(dir, "model_*.pt")):
-        epoch = int(path.basename(file)[6:-3])
-        if epoch > last_epoch:
+        if path.getmtime(file) < start_time:
             log.debug(f"remove: {file}")
             os.remove(file)
         else:
+            epoch = int(path.basename(file)[6:-3])
             epochs.append(epoch)
     epochs.sort()
     return epochs

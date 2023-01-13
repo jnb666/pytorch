@@ -1,11 +1,19 @@
 import logging as log
+import queue
+from typing import Any
 
+import kornia as K
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 import torchvision  # type: ignore
 from torch import Tensor, nn
 
-from .utils import InvalidConfigError
+from .utils import (InvalidConfigError, format_args, get_module, getargs,
+                    init_logger, set_seed)
+
+max_queue_size = 2
+queue_poll_timeout = 0.05
 
 
 class Dataset:
@@ -74,6 +82,20 @@ class Dataset:
         """Shape of each image"""
         return self.data.size()[1:]
 
+    def clone(self) -> "Dataset":
+        """Return a new copy of the dataset - cloning the tensor data"""
+        log.debug("clone dataset")
+        ds = Dataset.__new__(Dataset)
+        ds.classes = self.classes
+        ds.batch_size = self.batch_size
+        ds.data = self.data.clone()
+        ds.targets = self.targets.clone()
+        if self.indexes is not None:
+            ds.indexes = self.indexes.clone()
+        else:
+            ds.indexes = None
+        return ds
+
     def to(self, device="cpu") -> "Dataset":
         """Move tensors to given device and return a new copy of the dataset"""
         if str(device) == str(self.data.device):
@@ -121,14 +143,20 @@ class Dataset:
         return self.nitems // self.batch_size
 
     def __iter__(self):
-        """Iterare over batches of data"""
-        return DatasetIterator(self)
+        self.batch = -1
+        return self
+
+    def __next__(self) -> tuple[Tensor, Tensor]:
+        self.batch += 1
+        if self.batch >= len(self):
+            raise StopIteration
+        return self[self.batch]
 
     def __str__(self) -> str:
         """Print summary of data size and type"""
-        return "images: {}{}\nlabels: {}{} nclasses={} batch_size={}".format(
-            self.data.dtype, list(self.data.size()), self.targets.dtype, list(self.targets.size()),
-            len(self.classes), self.batch_size
+        return "images: {}{} device={}\nlabels: {}{} nclasses={} batch_size={}".format(
+            self.data.dtype, list(self.data.size()), self.data.device,
+            self.targets.dtype, list(self.targets.size()), len(self.classes), self.batch_size
         )
 
     def reset(self) -> "Dataset":
@@ -162,19 +190,111 @@ class Dataset:
         return self
 
 
-class DatasetIterator:
-    """DatasetIterator is a helper class to iterate over Dataset batches"""
+class Transforms(nn.Module):
+    """Transforms holds the list of Kornia data augmentation transforms to apply"""
 
-    def __init__(self, dataset: Dataset):
-        self.dataset = dataset
-        self.batch = 0
+    def __init__(self, config: list[Any]):
+        super().__init__()
+        self.seq = nn.Sequential()
+        self._repr = "transforms("
+        for argv in config:
+            typ, args, kwargs = getargs(argv)
+            self.seq.append(get_module("transform", K.augmentation, typ, args, kwargs))
+            self._repr += "\n  " + typ + format_args(args, kwargs)
+        self._repr += "\n)"
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.seq(x)
+
+    def __str__(self):
+        return self._repr
+
+
+class DataLoader:
+    """DataLoader loads batches of data from the training set and optionally applies shuffling and augmentation transform
+
+    This will run in a separate thread - if pin_memory is set then CPU tensors are loaded into pinned memory.
+    """
+
+    def __init__(self, pin_memory: bool = False):
+        self.pin_memory = pin_memory
+        self.debug = (log.getLogger("").getEffectiveLevel() == log.DEBUG)
+
+    def start(self, ds: Dataset, shuffle: bool = False, transform: Transforms | None = None, seed: int = 1) -> None:
+        self.batches = len(ds)
+        self._str = str(ds) + "\n" + str(transform) if transform else str(ds)
+        self.queue = mp.Queue(maxsize=max_queue_size)  # type: ignore
+        self.done = mp.Event()
+        self.loader = Loader(ds, shuffle, transform, self.queue, self.done, seed=seed,
+                             pin_memory=self.pin_memory, debug=self.debug)
+        self.loader.start()
+
+    def shutdown(self) -> None:
+        log.info(f"DataLoader: shutdown")
+        self.done.set()
+        self.loader.join()
 
     def __next__(self) -> tuple[Tensor, Tensor]:
-        if self.batch < len(self.dataset):
-            res = self.dataset[self.batch]
-            self.batch += 1
-            return res
-        raise StopIteration
+        self.batch += 1
+        if self.batch >= self.batches:
+            raise StopIteration
+        i, data, targets = self.queue.get()
+        if i != self.batch:
+            raise RuntimeError(f"invalid batch {i} returned from loader - expecting {self.batch}")
+        return data, targets
+
+    def __len__(self) -> int:
+        return self.batches
+
+    def __iter__(self):
+        self.batch = -1
+        return self
+
+    def __str__(self) -> str:
+        return self._str
+
+
+class Loader(mp.Process):
+    """Spawned subprocess which will apply transforms and return batches of data via a queue"""
+
+    def __init__(self, ds: Dataset, shuffle: bool, transform: nn.Module | None, q: mp.Queue, done,
+                 seed: int = 1,  pin_memory: bool = False, debug: bool = False):
+        super().__init__()
+        set_seed(seed)
+        self.ds = ds
+        self.shuffle = shuffle
+        self.transform = transform
+        self.queue = q
+        self.done = done
+        self.pin_memory = pin_memory
+        self.debug = debug
+        self.daemon = True
+
+    def run(self):
+        init_logger(debug=self.debug)
+        log.info(f"Loader: batches={len(self.ds)} pin_memory={self.pin_memory}")
+        while True:
+            if self.shuffle:
+                self.ds.shuffle()
+            for i, (data, targets) in enumerate(self.ds):
+                if self.transform:
+                    with torch.no_grad():
+                        data = self.transform(data)
+                if self.pin_memory:
+                    data, targets = data.pin_memory(), targets.pin_memory()
+                if self.put(i, data, targets):
+                    log.debug("Loader: end run")
+                    self.queue.close()
+                    return
+
+    def put(self, i, data, targets):
+        while not self.done.is_set():
+            try:
+                self.queue.put((i, data, targets), timeout=queue_poll_timeout)
+                return self.done.is_set()
+            except queue.Full:
+                pass
+        return True
 
 
 def to_tensor(data, device, dtype) -> Tensor:

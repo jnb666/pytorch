@@ -11,10 +11,9 @@ import torchvision  # type: ignore
 import torchvision.transforms.functional as F  # type: ignore
 from torch import Tensor, nn
 
-from .dataset import Dataset
+from .dataset import DataLoader, Dataset, Transforms
 from .scheduler import StepLRandWeightDecay
-from .utils import (DatasetNotFoundError, InvalidConfigError, get_module,
-                    pformat, splitargs)
+from .utils import InvalidConfigError, pformat
 
 default_weight_init = {
     "Linear": ["kaiming_normal", {"nonlinearity": "relu"}],
@@ -73,7 +72,8 @@ class Config():
 
     Attributes:
         name:str    basename of config
-        version:str config version string
+        version:str config version string or "1" if not defined
+        text:str    raw content
         half:bool   set if to use half precision
         dir:str     run directory path
         cfg:dict    parsed config data
@@ -88,13 +88,14 @@ class Config():
             self.name = name
             self.text = data
         else:
-            try:
-                with open(file, mode="r", encoding="utf-8") as f:
-                    self.text = f.read()
-                self.name = path.basename(file).removesuffix(".toml")
-            except FileNotFoundError as err:
-                raise InvalidConfigError(f"file not found: {err}")
-
+            log.debug(f"load config from {file}")
+            with open(file, mode="r", encoding="utf-8") as f:
+                self.text = f.read()
+            base = path.basename(file).removesuffix(".toml")
+            if base == "config":
+                self.name = path.basename(path.split(path.dirname(file))[0])
+            else:
+                self.name = base
         try:
             self.cfg = tomli.loads(self.text)
         except tomli.TOMLDecodeError as err:
@@ -125,35 +126,37 @@ class Config():
                 os.remove(file)
         if not path.exists(self.dir):
             os.makedirs(self.dir)
-        with open(path.join(self.dir, "config.yaml"), mode="w", encoding="utf-8") as f:
+        with open(path.join(self.dir, "config.toml"), mode="w", encoding="utf-8") as f:
             f.write(self.text)
 
     def data(self, typ: str) -> dict[str, Any]:
         if typ == "train":
-            cfg = self.cfg["train_data"]
+            cfg = self.cfg.get("train_data", {})
         elif typ == "test":
-            cfg = self.cfg["test_data"]
+            cfg = self.cfg.get("test_data", {})
         elif typ == "valid":
             cfg = self.cfg.get("valid_data", {})
         else:
             raise InvalidConfigError(f"invalid dataset type: {typ}")
         return cfg
 
-    def dataset(self, root: str, typ: str = "test", device: str = "cpu",
-                dtype: torch.dtype = torch.float32) -> Dataset:
+    def shuffle(self, typ: str = "train"):
+        return self.data(typ).get("shuffle", False)
+
+    def dataset(self, root: str, typ: str = "test", device: str = "cpu") -> Dataset:
         """Load a new train, test or valid dataset and applies normalization if defined.
 
-        Raises DatasetNotFoundError if it does not exist - e.g. for optional valid dataset
+        Raises InvalidConfigError if it does not exist
         """
         cfg = self.data(typ)
         if len(cfg) == 0:
-            raise DatasetNotFoundError(typ)
+            raise InvalidConfigError(f"{typ} dataset configuration not found")
         train = cfg.get("train", False)
         batch_size = cfg.get("batch_size", 0)
         start = cfg.get("start", 0)
         end = cfg.get("end", 0)
         ds = Dataset(cfg["dataset"], root, train=train, batch_size=batch_size,
-                     device=device, dtype=dtype, start=start, end=end)
+                     device=device, start=start, end=end)
         try:
             args = cfg["normalize"]
             log.debug(f"normalize: {args}")
@@ -165,17 +168,15 @@ class Config():
             pass
         return ds
 
-    def transforms(self) -> nn.Module | None:
+    def transforms(self, typ: str = "train") -> Transforms | None:
         """Get the transforms defined on the image tensor from Kornia data augmentations"""
         try:
-            config = self.cfg["transform"]["transforms"]
+            cfg = self.data(typ)["transform"]
+            if not isinstance(cfg, list):
+                raise InvalidConfigError(f"invalid transform for {typ} - should be a list")
+            return Transforms(cfg)
         except KeyError:
             return None
-        transform = nn.Sequential()
-        for argv in config:
-            typ, args, kwargs = splitargs(argv)
-            transform.append(get_module("transform", K.augmentation, typ, args, kwargs))
-        return transform
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Create a new optimizer based on config [train] optimizer setting"""

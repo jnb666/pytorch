@@ -1,10 +1,16 @@
+version = 2
 half = true
 
 [train_data]
 dataset = "CIFAR10"
 train = true
 batch_size = 128
+shuffle = true
 normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+transform = [
+  ["RandomHorizontalFlip"],
+  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
+]
 
 [test_data]
 dataset = "CIFAR10"
@@ -15,10 +21,10 @@ normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 block = [
   ["Conv2d", "$expand", 1, {bias=false}],
   ["BatchNorm2d"],
-  ["ReLU"],
+  ["ReLU", {inplace=true}],
   ["Conv2d", "$expand", 3, {stride="$stride", padding=1, groups="$expand", bias=false}],
   ["BatchNorm2d"],
-  ["ReLU"],
+  ["ReLU", {inplace=true}],
   ["Conv2d", "$nout", 1, {bias=false}],
   ["BatchNorm2d"],
 ]
@@ -41,7 +47,7 @@ block2 = [
 layers = [
   ["Conv2d", 32, 3, {padding=1, bias=false}],
   ["BatchNorm2d"],
-  ["ReLU"],
+  ["ReLU", {inplace=true}],
 
   ["block1", {nout=16, expand=16, stride=1}],
 
@@ -69,7 +75,7 @@ layers = [
 
   ["Conv2d", 1280, 1, {bias=false}],
   ["BatchNorm2d"],
-  ["ReLU"],
+  ["ReLU", {inplace=true}],
 
   ["AvgPool2d", 4],
   ["Flatten"],
@@ -80,15 +86,8 @@ layers = [
 Linear = ["normal", {std=1e-3}]
 Conv2d = ["kaiming_normal", {mode="fan_out", nonlinearity="relu"}]
 
-[transform]
-transforms = [
-  ["RandomHorizontalFlip"],
-  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
-]
-
 [train]
 optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=5e-4} ]
 scheduler = ["CosineAnnealingLR", {T_max=200} ]
 epochs = 200
-shuffle = true
 

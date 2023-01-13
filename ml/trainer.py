@@ -12,12 +12,12 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
+from torch.profiler import record_function
 
 from .config import Config
-from .dataset import Dataset
+from .dataset import DataLoader, Dataset
 from .model import Model
-from .utils import (DatasetNotFoundError, InvalidConfigError, RunInterrupted,
-                    pformat)
+from .utils import InvalidConfigError, RunInterrupted, load_checkpoint, pformat
 
 
 class Stats():
@@ -38,6 +38,10 @@ class Stats():
         self.start = [time.time()]
         self.elapsed = [0.0]
         self.running = False
+
+    def clear(self) -> None:
+        """Clear to default"""
+        self.__dict__.update(Stats().__dict__)
 
     def __str__(self):
         s = "Epoch {:3d}:  Train loss: {:.3f}  ".format(self.current_epoch, self.train_loss[-1])
@@ -143,28 +147,6 @@ class Stopper:
         log.debug(f"valid average: {np.array(stats.valid_accuracy_avg)}")
 
 
-class Datasets:
-    """Datasets wraps the training, test, validation datasets and augmentation transform"""
-
-    def __init__(self, cfg: Config, rootdir: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
-        try:
-            self.train_data = cfg.dataset(rootdir, "train", device, dtype)
-            log.info(f"== train data: ==\n{self.train_data}")
-            self.test_data = cfg.dataset(rootdir, "test", device, dtype)
-            log.info(f"== test data: ==\n{self.test_data}")
-        except DatasetNotFoundError as typ:
-            raise InvalidConfigError(f"{typ} data set not found")
-        self.valid_data: Dataset | None
-        try:
-            self.valid_data = cfg.dataset(rootdir, "valid", device, dtype)
-            log.info(f"== valid data: ==\n{self.valid_data}")
-        except DatasetNotFoundError:
-            self.valid_data = None
-        self.transform = cfg.transforms()
-        if self.transform:
-            log.info(f"== transforms: ==\n{self.transform}")
-
-
 class Trainer:
     """Trainer optimises the model weights for a given training dataset and evaluations the loss and accuracy.
 
@@ -192,7 +174,6 @@ class Trainer:
         self.cfg = cfg
         self.dir = cfg.dir
         self.device = device
-        self.shuffle = cfg.train.get("shuffle", False)
         self.log_every = int(cfg.train.get("log_every", 1))
         self.save_every = int(cfg.train.get("save_every", 10))
         self.model = model
@@ -246,81 +227,70 @@ class Trainer:
     def resume_from(self, epoch: int) -> Stats:
         """Load saved stats, weights and random state from checkpoint file"""
         log.info(f"resume from epoch {epoch}")
-        file = path.join(self.dir, f"model_{epoch}.pt")
-        log.debug(f"load checkpoint from {file} map_location={self.device}")
-        checkpoint = torch.load(file, map_location=self.device)
-
+        checkpoint = load_checkpoint(self.dir, epoch, device=self.device, set_rng_state=True)
         stats = Stats()
         stats.load_state_dict(checkpoint["stats_state_dict"])
         stats.current_epoch = epoch
         stats.xrange[1] = max(stats.xrange[1], self.epochs)
-
-        try:
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            if self.scheduler:
-                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-            if self.cfg.half:
-                self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
-        except (RuntimeError, KeyError) as err:
-            log.error(f"error loading trainer state from {file}: {err}")
-            stats.current_epoch = 0
-
-        if hasattr(checkpoint, "torch_rng_state"):
-            torch.set_rng_state(checkpoint["torch_rng_state"].to("cpu"))
-        if hasattr(checkpoint, "numpy_rng_state"):
-            np.random.set_state(checkpoint["numpy_rng_state"])
-        if hasattr(checkpoint, "random_state"):
-            random.setstate(checkpoint["random_state"])
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if self.scheduler:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if self.cfg.half:
+            self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        if self.stopper:
+            self.stopper.update_stats(stats)
         return stats
 
-    def train(self, train_data: Dataset, transform: nn.Module | None = None, half: bool = False,
-              should_stop: Callable[[], bool] | None = None) -> float:
+    def train(self, train_data: DataLoader, should_stop: Callable | None = None) -> float:
         """Train one epoch against training dataset - returns training loss"""
-        if self.shuffle:
-            train_data.shuffle()
+        self.model.train()
         train_loss = 0.0
-        for i, (data, targets) in enumerate(train_data):
-            if transform is not None and (self.stopper is None or self.stopper.stopping < 0):
-                with torch.no_grad():
-                    data = transform(data)
-            self.model.train()
-            data, targets = data.to(self.device), targets.to(self.device)
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
-                pred = self.model(data)
-                loss = self.loss_fn(pred, targets)
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad()
-            train_loss += float(loss) / len(train_data)
-            if should_stop and should_stop():
-                raise RunInterrupted()
-        return train_loss
-
-    def test(self, test_data: Dataset, should_stop: Callable[[], bool] | None = None) -> tuple[float, float]:
-        """Calculate loss and accuracy against the test set - returns test loss and accuracy"""
-        self.model.eval()
-        if len(self.predict) != test_data.nitems:
-            self.predict = torch.zeros((test_data.nitems), dtype=torch.int64)
-        test_loss = 0.0
-        total_correct = 0
-        samples = 0
-        with torch.no_grad():
-            for data, targets in test_data:
-                data, targets = data.to(self.device), targets.to(self.device)
+        iterator = iter(train_data)
+        for i in range(len(train_data)):
+            with record_function(f"--training:get_data--"):
+                data, targets = next(iterator)
+                data = data.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
+            with record_function(f"--training:forward--"):
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                     pred = self.model(data)
-                    loss = self.loss_fn(pred, targets).item()
-                outputs = pred.argmax(1)
-                correct = int((outputs == targets).type(torch.float).sum())
-                self.predict[samples: samples+len(targets)] = outputs
-                test_loss += float(loss) / len(test_data)
-                total_correct += correct
-                samples += len(targets)
+                    loss = self.loss_fn(pred, targets)
+            with record_function(f"--training:backward--"):
+                self.scaler.scale(loss).backward()
+            with record_function(f"--training:update_loss--"):
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+                train_loss += float(loss)
+            if should_stop and should_stop(train=True):
+                raise RunInterrupted()
+        return train_loss / len(train_data)
+
+    def test(self, test_data: Dataset, should_stop: Callable | None = None) -> tuple[float, float]:
+        """Calculate loss and accuracy against the test set - returns test loss and accuracy"""
+        with record_function(f"--testing--"):
+            self.model.eval()
+            if len(self.predict) != test_data.nitems:
+                self.predict = torch.zeros((test_data.nitems), dtype=torch.int64)
+            test_loss = 0.0
+            total_correct = 0
+            samples = 0
+            with torch.no_grad():
+                for data, targets in test_data:
+                    data, targets = data.to(self.device), targets.to(self.device)
+                    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
+                        pred = self.model(data)
+                        loss = self.loss_fn(pred, targets)
+                    outputs = pred.argmax(1)
+                    correct = int((outputs == targets).type(torch.float).sum())
+                    self.predict[samples: samples+len(targets)] = outputs
+                    test_loss += float(loss)
+                    total_correct += correct
+                    samples += len(targets)
                 if should_stop and should_stop():
                     raise RunInterrupted()
-        return test_loss, total_correct/samples
+            return test_loss/len(test_data), total_correct/samples
 
     def step(self, stats: Stats) -> None:
         """If scheduler is defined then call it's step function"""

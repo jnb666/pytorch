@@ -1,16 +1,23 @@
+version = 2
 half = true
 
 [train_data]
 dataset = "CIFAR10"
 train = true
 batch_size = 128
+shuffle = true
 normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+transform = [
+  ["RandomHorizontalFlip"],
+  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
+]
 
 [test_data]
 dataset = "CIFAR10"
 batch_size = 500
 end = 5000
 normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+
 
 [valid_data]
 dataset = "CIFAR10"
@@ -49,15 +56,9 @@ layers = [
 Linear = ["xavier_uniform"]
 Conv2d = ["xavier_uniform"]
 
-[transform]
-transforms = [
-  ["RandomHorizontalFlip"],
-  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
-]
-
 [train]
-optimizer = ["Adam", {lr=0.002, weight_decay=1e-5} ]
+optimizer = ["Adam", {lr=0.002, weight_decay=1e-4} ]
 scheduler = ["CosineAnnealingLR", {T_max=75} ]
 stop = {epochs=2, extra=4, avg=12}
 epochs = 75
-shuffle = true
+

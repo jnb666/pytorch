@@ -18,10 +18,6 @@ class InvalidConfigError(Exception):
     pass
 
 
-class DatasetNotFoundError(Exception):
-    pass
-
-
 class RunInterrupted(Exception):
     pass
 
@@ -55,15 +51,17 @@ def pformat(data) -> str:
     return pp.pformat(data)
 
 
-def get_device(cpu: bool) -> str:
+def get_device(cpu: bool, deterministic: bool = False) -> str:
     """Get cuda or cpu device"""
     if not cpu and torch.cuda.is_available():
         device = "cuda"
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        if deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
     else:
         device = "cpu"
-    log.info(f"== pytorch {torch.__version__}  device={device} ==")
+    log.info(f"== pytorch {torch.__version__}  device={device} deterministic={deterministic} ==")
+    torch.multiprocessing.set_start_method("forkserver")
     return device
 
 
@@ -73,6 +71,21 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     log.info(f'Set random seed={seed}')
+
+
+def load_checkpoint(dir: str, epoch: int = 0, device: str = "cpu", set_rng_state: bool = False) -> dict[str, Any]:
+    """Load checkpoint file from run dir - will raise FileNotFoundError if it does not exist"""
+    file = path.join(dir, f"model_{epoch}.pt" if epoch > 0 else "model.pt")
+    checkpoint = torch.load(file, map_location=device)
+    log.info(f"loaded checkpoint from {file}")
+    if set_rng_state:
+        if "torch_rng_state" in checkpoint:
+            torch.set_rng_state(checkpoint["torch_rng_state"].to("cpu"))
+        if "numpy_rng_state" in checkpoint:
+            np.random.set_state(checkpoint["numpy_rng_state"])
+        if "random_state" in checkpoint:
+            random.setstate(checkpoint["random_state"])
+    return checkpoint
 
 
 def getargs(argv, vars=None):

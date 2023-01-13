@@ -11,9 +11,9 @@ from typing import Any
 import redis
 import torch
 
-from .config import Index
+from .config import Config, Index
 from .trainer import Stats
-from .utils import InvalidConfigError
+from .utils import InvalidConfigError, load_checkpoint
 
 redis_port = 6379
 
@@ -21,6 +21,7 @@ redis_port = 6379
 @dataclass
 class State:
     name: str = ""
+    version: str = ""
     epochs: list[int] = field(default_factory=list)
     epoch: int = -1
     max_epoch: int = 0
@@ -52,59 +53,74 @@ class Database:
         if notify:
             self.db.config_set("notify-keyspace-events", "KA")
 
-    def init_config(self, dir: str) -> None:
+    def init_config(self, cfgdir: str, rundir: str) -> None:
         """Initialise ml.config hash from all .toml files in dir"""
         p = self.db.pipeline(transaction=True)
         p.delete("ml:config")
-        for file in glob(path.join(dir, "*.toml")):
-            with open(file, encoding="utf-8") as f:
-                name = path.basename(file).removesuffix(".toml")
-                p.hset("ml:config", name, f.read())
+        # previous runs
+        for file in glob(path.join(rundir, "*/*/config.toml")):
+            cfg = Config(rundir, file=file)
+            p.hset("ml:config", cfg.name+":"+cfg.version, cfg.text)
+        # and current config files
+        for file in glob(path.join(cfgdir, "*.toml")):
+            cfg = Config(rundir, file=file)
+            p.hset("ml:config", cfg.name+":"+cfg.version, cfg.text)
         p.execute()
-        self.set_model_state()
+        self.set_model_state(self.get_state())
 
-    def update_config(self, file: str) -> State:
+    def update_config(self, file: str, rundir: str) -> State:
         """Called when config file is created, updated or deleted"""
+        state = self.get_state()
         if file.endswith(".toml"):
-            name = path.basename(file).removesuffix(".toml")
             try:
-                with open(file, encoding="utf-8") as f:
-                    log.info(f"updated config: {name}")
-                    self.db.hset("ml:config", name, f.read())
+                cfg = Config(rundir, file=file)
+                log.info(f"updated config: {cfg.name}:{cfg.version}")
+                self.db.hset("ml:config", cfg.name+":"+cfg.version, cfg.text)
+                if state.name == cfg.name:
+                    state.version = cfg.version
             except FileNotFoundError:
+                name = path.basename(file).removesuffix(".toml")
                 log.info(f"removed config: {name}")
-                self.db.hdel("ml:config", name)
-        return self.set_model_state()
+                for key in self.db.hkeys("ml:config"):
+                    if key.decode().startswith(name+":"):
+                        self.db.hdel("ml:config", key)
+        return self.set_model_state(state)
 
-    def get_config(self, name: str) -> str:
+    def get_config(self, name: str, version: str) -> str:
         """Get toml config data as a string"""
-        data = self.db.hget("ml:config", name)
+        data = self.db.hget("ml:config", name+":"+version)
         if not data:
-            raise InvalidConfigError(f"config for {name} not found in DB")
-        return data.decode("utf-8")
+            raise InvalidConfigError(f"config for {name} version {version} not found in DB")
+        return data.decode()
 
-    def get_models(self) -> list[str]:
+    def get_models(self) -> list[tuple[str, list[str]]]:
         """Get sorted list of defined models"""
-        models = [key.decode("utf-8") for key in self.db.hkeys("ml:config")]
-        models.sort()
-        return models
+        names = []
+        versions = {}
+        for key in self.db.hkeys("ml:config"):
+            name, version = key.decode().split(":")
+            if name not in names:
+                names.append(name)
+                versions[name] = [version]
+            else:
+                versions[name].append(version)
+        return [(name, list(sorted(versions[name]))) for name in sorted(names)]
 
-    def set_model(self, name: str, dir: str, max_epoch: int) -> Stats:
+    def set_model(self, cfg: Config) -> Stats:
         """Set current model and load epochs and stats from filesystem"""
-        log.debug(f"set_model: name={name} dir={dir}")
-        state = State(name=name, max_epoch=max_epoch)
-        file = path.join(dir, "model.pt")
+        log.debug(f"set_model: name={cfg.name} version={cfg.version} dir={cfg.dir}")
+        state = State(name=cfg.name, version=cfg.version, max_epoch=cfg.epochs)
         stats = Stats()
         try:
-            checkpoint = torch.load(file, map_location="cpu")
+            checkpoint = load_checkpoint(cfg.dir)
             stats.load_state_dict(checkpoint["stats_state_dict"])
-            log.debug(f"set_model: loaded stats from {file} - epoch={stats.current_epoch}")
+            log.debug(f"set_model: loaded stats - epoch={stats.current_epoch}")
         except FileNotFoundError:
             pass
-        stats.xrange = [0, max_epoch]
+        stats.xrange = [0, cfg.epochs]
         stats.running = False
         state.epoch = stats.current_epoch
-        for file in glob(path.join(dir, "model_*.pt")):
+        for file in glob(path.join(cfg.dir, "model_*.pt")):
             filename = path.basename(file)
             state.epochs.append(int(filename[6:-3]))
         state.epochs.sort()
@@ -114,13 +130,11 @@ class Database:
         self.set_model_state(state)
         return stats
 
-    def set_model_state(self, state: State | None = None) -> State:
+    def set_model_state(self, state: State) -> State:
         """Refresh model checksum and list of models in state hash"""
-        if state is None:
-            state = self.get_state()
-        state.models = self.get_models()
+        state.models = [key.decode() for key in self.db.hkeys("ml:config")]
         if state.name:
-            data = self.db.hget("ml:config", state.name)
+            data = self.db.hget("ml:config", state.name+":"+state.version)
             if data:
                 m = hashlib.sha256()
                 m.update(data)

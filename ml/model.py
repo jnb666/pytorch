@@ -24,20 +24,26 @@ class Layer(nn.Module):
         out_shape:torch.Size    output shape - set when containing Model is initialised
     """
 
-    def __init__(self, index: Index, argv: list[Any], vars=None):
+    def __init__(self, index: Index, argv: list[Any], vars=None, device: str = "cpu"):
         super().__init__()
         self.index = index
         self.out_shape = torch.Size()
         self.typ, self.args, self.kwargs = getargs(argv, vars)
-        typ = "Lazy" + self.typ if hasattr(torch.nn, "Lazy" + self.typ) else self.typ
-        self.module = get_module("model", torch.nn, typ, self.args, self.kwargs)
+        if hasattr(torch.nn, "Lazy" + self.typ):
+            typ = "Lazy" + self.typ
+            kwargs = self.kwargs.copy()
+            kwargs["device"] = device
+        else:
+            typ = self.typ
+            kwargs = self.kwargs
+        self.module = get_module("model", torch.nn, typ, self.args, kwargs)
         log.debug(f"  {index} {repr(self.module)}")
 
     def forward(self, x: Tensor) -> Tensor:
         return self.module(x)
 
     def initialise(self, input: Tensor) -> Tensor:
-        log.debug(f"{self.index} {self.typ} initialise {list(input.shape)}")
+        # log.debug(f"{self.index} {self.typ} initialise {list(input.shape)}")
         x = self(input)
         self.out_shape = x.size()[1:]
         return x
@@ -98,7 +104,7 @@ class AddBlock(nn.Module):
         return self.module1(x) + self.module2(x)
 
     def initialise(self, input: Tensor) -> Tensor:
-        log.debug(f"{self.index} {self.typ} initialise {list(input.shape)}")
+        # log.debug(f"{self.index} {self.typ} initialise {list(input.shape)}")
         x = input
         for ix in self.block1:
             x = self.layers[ix].initialise(x)
@@ -138,8 +144,10 @@ class Model(nn.Sequential):
     The model is instantiated with float32 datatype on the CPU, it is ony moved to the device after weight initialisation.
 
     Args:
-       config:Config            parsed toml config file
-       input_shape:torch.Size   shape of input image (C,H,W)
+        config:Config           parsed toml config file
+        input_shape:torch.Size  shape of input image (C,H,W)
+        device:str              device for layer weights
+        init_weights:bool       if set then will call init_weights
 
     Attributes:
         config:Config           config info
@@ -158,7 +166,7 @@ class Model(nn.Sequential):
         self.indexes: list[Index] = []
         self.add(Index((1,)), self.indexes, self, ["layers"])
 
-        x = torch.zeros((1,) + self.input_shape)
+        x = torch.zeros((1,) + self.input_shape, device=device)
         for index in self.indexes:
             try:
                 x = self.layers[index].initialise(x)
@@ -211,7 +219,7 @@ class Model(nn.Sequential):
             else:
                 raise InvalidConfigError(f"block definition should be a list - got {defn}")
         else:
-            layer = Layer(index, args, vars)
+            layer = Layer(index, args, vars, device=self.device)
             seq.append(layer)
             self.layers[index] = layer
         indexes.append(index)

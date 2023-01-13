@@ -1,9 +1,16 @@
+version = 2
+
 [train_data]
 dataset = "MNIST"
 train = true
 end = 50000
 batch_size = 256
+shuffle = true
 normalize = [[0.1307], [0.3081]]
+transform = [
+  ["RandomAffine", { p=0.5, degrees=15, scale=[0.85,1.15], padding_mode="reflection" }],
+  ["RandomElasticTransform", { p=0.5, kernel_size=[9,9], sigma=[4.0,4.0], alpha=[0.5,0.5], padding_mode="reflection" }],
+]
 
 [valid_data]
 dataset = "MNIST"
@@ -30,15 +37,8 @@ layers = [
   ["Linear", 10 ],
 ]
 
-[transform]
-transforms = [
-  ["RandomAffine", { p=0.5, degrees=15, scale=[0.85,1.15], padding_mode="reflection" }],
-  ["RandomElasticTransform", { p=0.5, kernel_size=[9,9], sigma=[4.0,4.0], alpha=[0.5,0.5], padding_mode="reflection" }],
-]
-
 [train]
 optimizer = ["Adam", {lr = 0.002} ]
-scheduler = ["StepLR", {step_size=10, gamma=0.25} ]
-epochs = 50
-shuffle = true
-stop = {epochs=2, avg=10}
+scheduler = ["StepLR", {step_size=15, gamma=0.2} ]
+epochs = 60
+stop = {epochs=2, avg=10, extra=2}
