@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--rundir", default="./runs", help="saved run directory root")
     parser.add_argument("--cpu", action="store_true", default=False, help="disable CUDA training")
     parser.add_argument("--seed", type=int, default=0, help="override random seed in config if set")
+    parser.add_argument("--max_items", type=int, default=0, help="limit maximum number of items per epoch")
     parser.add_argument("--epochs", type=int, default=0, help="number of epochs to train")
     parser.add_argument("--resume", type=int, default=0, help="resume training at given epoch")
     parser.add_argument("--deterministic", action="store_true", default=False, help="deterministic runs with CUDA (slower)")

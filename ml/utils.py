@@ -88,7 +88,25 @@ def load_checkpoint(dir: str, epoch: int = 0, device: str = "cpu", set_rng_state
     return checkpoint
 
 
+def save_checkpoint(dir: str, epoch: int, checkpoint: dict[str, Any], verbose: bool = False) -> None:
+    """Save checkpoint dict to disk"""
+    checkpoint["torch_rng_state"] = torch.get_rng_state()
+    checkpoint["numpy_rng_state"] = to_list(np.random.get_state())
+    checkpoint["random_state"] = random.getstate()
+    file = path.join(dir, f"model_{epoch}.pt")
+    if verbose:
+        log.info(f"saved checkpoint to {file}")
+    else:
+        log.debug(f"save checkpoint to {file}")
+    if not path.exists(dir):
+        os.makedirs(dir)
+    torch.save(checkpoint, file)
+    link(file, path.join(dir, "model.pt"))
+
+
 def getargs(argv, vars=None):
+    if vars is None:
+        vars = {}
     typ, args, kwargs = splitargs(argv)
     for i, arg in enumerate(args):
         args[i] = getarg(arg, vars)
@@ -124,7 +142,7 @@ def getarg(arg, vars):
     if isinstance(arg, list) and len(arg) == 2:
         return (_arg(arg[0], vars), _arg(arg[1], vars))
     if isinstance(arg, list):
-        return [_arg(i) for i in arg]
+        return [_arg(i, vars) for i in arg]
     return _arg(arg, vars)
 
 
@@ -135,3 +153,21 @@ def _arg(arg, vars):
         except KeyError:
             raise InvalidConfigError(f"{arg} not defined")
     return arg
+
+
+def link(file, link):
+    try:
+        os.remove(link)
+    except FileNotFoundError:
+        pass
+    os.link(file, link)
+
+
+def to_list(tuple):
+    res = []
+    for x in tuple:
+        if isinstance(x, np.ndarray):
+            res.append(x.tolist())
+        else:
+            res.append(x)
+    return res

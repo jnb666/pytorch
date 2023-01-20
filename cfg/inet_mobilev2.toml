@@ -1,23 +1,26 @@
-version = 2
+version = 1
 half = true
 
 [train_data]
-dataset = "CIFAR10"
+dataset = "Imagenet"
 train = true
 batch_size = 128
 shuffle = true
+resize = 232
 transform = [
+  ["RandomCrop", [224, 224]],
   ["RandomHorizontalFlip"],
-  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }],
-  ["Normalize", [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+  ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
 ]
 multi_process = true
 
 [test_data]
-dataset = "CIFAR10"
-batch_size = 500
+dataset = "Imagenet"
+batch_size = 200
+resize = 232
 transform = [
-  ["Normalize", [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+  ["CenterCrop", 224],
+  ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
 ]
 
 [model]
@@ -48,13 +51,13 @@ block2 = [
 ]
 
 layers = [
-  ["Conv2d", 32, 3, {padding=1, bias=false}],
+  ["Conv2d", 32, 3, {stride=2, padding=1, bias=false}],
   ["BatchNorm2d"],
   ["ReLU", {inplace=true}],
 
   ["block1", {nout=16, expand=32, stride=1}],
 
-  ["block1", {nout=24, expand=96, stride=1}],
+  ["block",  {nout=24, expand=96, stride=2}],
   ["block2", {nout=24, expand=144, stride=1}],
 
   ["block",  {nout=32, expand=144, stride=2}],
@@ -80,17 +83,17 @@ layers = [
   ["BatchNorm2d"],
   ["ReLU", {inplace=true}],
 
-  ["AvgPool2d", 4],
+  ["AvgPool2d", 7],
   ["Flatten"],
-  ["Linear", 10],
+  ["Dropout", 0.2],
+  ["Linear", 1000],
 ]
 
 [weight_init]
-Linear = ["normal", {std=1e-3}]
+Linear = ["normal", {std=0.01}]
 Conv2d = ["kaiming_normal", {mode="fan_out", nonlinearity="relu"}]
 
 [train]
-optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=5e-4} ]
-scheduler = ["CosineAnnealingLR", {T_max=200} ]
+optimizer = ["SGD", {lr=0.075, momentum=0.9, nesterov=true, weight_decay=4e-5} ]
+scheduler = ["ExponentialLR", {gamma=0.98} ]
 epochs = 200
-

@@ -1,0 +1,31 @@
+version = 1
+
+[train_data]
+dataset = "Imagenet"
+train = true
+batch_size = 64
+shuffle = true
+resize = 232
+transform = [
+  ["RandomCrop", [224, 224]],
+  ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
+]
+multi_process = true
+
+[test_data]
+dataset = "Imagenet"
+batch_size = 100
+resize = 232
+transform = [
+  ["CenterCrop", 224],
+  ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
+]
+multi_process = true
+
+[model]
+model = ["resnet50", {weights="IMAGENET1K_V2"}]
+
+[train]
+optimizer = ["SGD", {lr=0.02, momentum=0.9, nesterov=true, weight_decay=5e-4} ]
+scheduler = ["CosineAnnealingLR", {T_max=200} ]
+epochs = 200

@@ -3,6 +3,7 @@ import math
 from typing import Any
 
 import torch
+import torchvision  # type: ignore
 from torch import Tensor, nn
 
 from .config import Config, Index
@@ -257,6 +258,25 @@ class Model(nn.Sequential):
             s += "\n" + str(layer)
             total_params += num_params(layer)
         return s + f"\ntotal parameters: {total_params:,}"
+
+
+def load_model(config: Config, input_shape: torch.Size, device: str = "cpu") -> nn.Module:
+    """Load new model file - if model var is set in the [model] config then loads a pretrained model
+    else initialiases the model from the layers definition.
+    """
+    cfg = config.cfg.get("model", {})
+    if cfg.get("layers") is not None:
+        return Model(config, input_shape, device, init_weights=True)
+    elif cfg.get("model") is not None:
+        argv = cfg.get("model")
+        if isinstance(argv, list) and len(argv) >= 1:
+            typ, args, kwargs = splitargs(argv)
+            model = get_module("model", torchvision.models, typ, args, kwargs)
+            return model.to(device)
+        else:
+            raise InvalidConfigError("model definition should be a list")
+    else:
+        raise InvalidConfigError("no model definition found")
 
 
 def init_parameter(weight_info, weight_type, layer_type, param, config) -> None:

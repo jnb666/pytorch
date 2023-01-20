@@ -118,7 +118,7 @@ class MainWindow(qw.QWidget):
     def __init__(self, loader: Loader, sender: Callable | None = None, running: bool = False):
         super().__init__()
         self.cfg: Config | None = None
-        self.model: Model | None = None
+        self.model: nn.Module | None = None
         self.data: Dataset | None = None
         self.stats = Stats()
         self.predict = None
@@ -192,23 +192,20 @@ class MainWindow(qw.QWidget):
         try:
             self.cfg, self.model, self.data, self.transform = self.loader.load_config(name, version)
         except (InvalidConfigError, FileNotFoundError) as err:
-            self.set_error(str(err))
+            self.set_error(name, version, str(err))
             return
         log.debug(f"loaded config: {self.cfg.name} version={self.cfg.version}")
         self.setWindowTitle(f"{self.cfg.name} v{self.cfg.version}")
+        self.data.reset()
         self.cfg_menu.update_config(self.cfg, self.stats)
-        self.img_menu.set_classes(self.data.classes)
+        self.img_menu.update_config(self.cfg, self.data.classes)
         for page in self.pages.values():
             page.update_config(self.cfg, self.model)
-        self.data.reset()
-        self.img_menu.update_config(self.cfg)
         self.update_stats()
 
-    def set_error(self, err: str) -> None:
+    def set_error(self, name: str, version: str, err: str) -> None:
         log.error(f"set_error: {err}")
         self.cfg_menu.set_error(err)
-        name = self.cfg_menu.model_select.currentText()
-        version = self.cfg_menu.version_select.currentText()
         data = self.loader.load_model(name, version)
         self.pages["config"].set_text(data)
 
@@ -220,6 +217,8 @@ class MainWindow(qw.QWidget):
         self.cfg_menu.update_stats(self.stats)
         if len(self.stats.predict):
             self.predict = torch.clone(self.stats.predict)
+        else:
+            self.predict = None
         name = self.menu.currentItem().text()
         self.pages[name].update_stats()
         log.debug(f"updated stats: {self.cfg.name} epoch={self.stats.current_epoch} running={self.stats.running}")
@@ -349,12 +348,14 @@ class CommandMenu(qw.QWidget):
         def send(*args):
             status, err = sender(*args)
             if status == "error":
-                main.set_error(err)
+                main.set_error(self._name, self._version, err)
 
         super().__init__()
         self.main = main
         self.send = send if sender else None
         self.in_error = False
+        self._name = ""
+        self._version = ""
         self._epoch = qw.QLabel()
         self._elapsed = qw.QLabel()
         self._learn_rate = qw.QLabel()
@@ -409,7 +410,9 @@ class CommandMenu(qw.QWidget):
         self._epoch.setText(f"epoch: {stats.current_epoch}")
         self._elapsed.setText(f"elapsed: {stats.elapsed_total()}")
         if len(stats.learning_rate):
-            self._learn_rate.setText(f"lr: {stats.learning_rate[-1]:.4}")
+            lr = stats.learning_rate[-1]
+            if lr != 0:
+                self._learn_rate.setText(f"lr: {lr:.4}")
         if self.send:
             self.start.setVisible(not stats.running)
             self.resume.setVisible(not stats.running)
@@ -431,6 +434,8 @@ class CommandMenu(qw.QWidget):
             self.send("start", epoch, False)
 
     def load_model(self, name, version):
+        self._name = name
+        self._version = version
         if self.send:
             self.send("load", name, version)
         else:
@@ -463,16 +468,19 @@ class ConfigLabel(qw.QScrollArea):
 
 class ConfigInfo(ConfigLabel):
 
-    def update_config(self, cfg: Config, model: Model) -> None:
+    def update_config(self, cfg: Config, model: nn.Module) -> None:
         """Called when new config file is loaded"""
         self.set_text(cfg.text)
 
 
 class ModelInfo(ConfigLabel):
 
-    def update_config(self, cfg: Config, model: Model) -> None:
+    def update_config(self, cfg: Config, model: nn.Module) -> None:
         """Called when new config file is loaded"""
-        self.set_text(str(model) + "\n\n" + model.weight_info() + "\n")
+        if isinstance(model, Model):
+            self.set_text(str(model) + "\n\n" + model.weight_info() + "\n")
+        else:
+            self.set_text(str(model))
 
 
 class StatsPlots(qw.QWidget):
@@ -563,7 +571,7 @@ class StatsPlots(qw.QWidget):
             self.columns = len(cols)
             self.table.updateGeometry()
 
-    def update_config(self, cfg: Config, model: Model) -> None:
+    def update_config(self, cfg: Config, model: nn.Module) -> None:
         """Called when new config file is loaded"""
         log.debug(f"update stats config: {cfg.name} max_epoch={cfg.epochs}")
         self._draw_plots()
@@ -600,20 +608,22 @@ class Heatmap(pg.GraphicsLayoutWidget):
             return
         nclasses = len(classes)
         init_plot(self.plot, xlabel="target", ylabel="prediction", xrange=[0, nclasses], yrange=[0, nclasses])
-        set_ticks(self.plot.getAxis("bottom"), classes)
-        set_ticks(self.plot.getAxis("left"), classes)
         img = pg.ImageItem(map)
         img.setColorMap(self.cmap)
         self.plot.addItem(img)
-        nitems = len(self.main.data.targets)
+        if nclasses > 100:
+            return
+        set_ticks(self.plot.getAxis("bottom"), classes)
+        set_ticks(self.plot.getAxis("left"), classes)
+        nitems = len(self.main.data)
         for y in range(nclasses):
             for x in range(nclasses):
                 val = map[x, y]
                 col = "w" if val < 0.5*nitems/nclasses else "k"
                 if val > 0:
-                    add_label(self.plot, x, y, val, col)
+                    add_label(self.plot, x+0.5, y+0.5, f"{val:.0f}", col, anchor=(0.5, 0.5))
 
-    def update_config(self, cfg: Config, model: Model) -> None:
+    def update_config(self, cfg: Config, model: nn.Module) -> None:
         """Called when new config file is loaded"""
         self.plot.clear()
 
@@ -657,8 +667,9 @@ class ImageMenu(qw.QWidget):
         layout = self._build()
         self.setLayout(layout)
 
-    def update_config(self, cfg: Config) -> None:
+    def update_config(self, cfg: Config, classes: list[str]) -> None:
         self.name = cfg.name
+        self._set_classes(classes)
         try:
             self.target_class = self.opts.image_class[cfg.name]
             self._combo.setCurrentIndex(self.target_class+1)
@@ -668,6 +679,7 @@ class ImageMenu(qw.QWidget):
             self._trans.setChecked(self.transformed)
         except KeyError:
             pass
+        log.debug(f"ImageMenu: update_config target_class={self.target_class} errors_only={self.errors_only}")
 
     def _build(self):
         prev = qw.QPushButton("<< prev")
@@ -700,10 +712,12 @@ class ImageMenu(qw.QWidget):
         cols.addStretch()
         return cols
 
-    def set_classes(self, classes: list[str]) -> None:
+    def _set_classes(self, classes: list[str]) -> None:
         """Assign list of classes"""
+        disconnect_signal(self._combo.currentIndexChanged)
         self._combo.clear()
         self._combo.addItems(["all classes"] + classes)
+        self._combo.currentIndexChanged.connect(self._filter_class)
         self.target_class = -1
         self._errors.setChecked(False)
         self.errors_only = False
@@ -757,7 +771,7 @@ class ImageViewer(pg.GraphicsLayoutWidget):
         transformed: bool      whether transform is enabled
     """
 
-    def __init__(self, main: MainWindow, rows: int = 5, cols: int = 7):
+    def __init__(self, main: MainWindow, rows: int = 6, cols: int = 7):
         super().__init__(border=True)
         self.main = main
         self.menu = main.img_menu
@@ -777,7 +791,7 @@ class ImageViewer(pg.GraphicsLayoutWidget):
     @ property
     def pages(self) -> int:
         if self.main.data:
-            return 1 + (self.main.data.nitems-1) // self.images_per_page
+            return 1 + (len(self.main.data)-1) // self.images_per_page
         else:
             return 0
 
@@ -797,7 +811,7 @@ class ImageViewer(pg.GraphicsLayoutWidget):
 
     def filter(self) -> None:
         """callback from ImageMenu """
-        if self.main.data and self.main.predict is not None:
+        if self.main.data is not None:
             self.page = 0
             self.main.data.filter(self.main.predict, self.menu.target_class, self.menu.errors_only)
             self._update()
@@ -807,16 +821,19 @@ class ImageViewer(pg.GraphicsLayoutWidget):
         log.debug(f"set transformed => {on}")
         self._update()
 
-    def update_config(self, cfg: Config, model: Model) -> None:
+    def update_config(self, cfg: Config, model: nn.Module) -> None:
         """Called when new config file is loaded"""
         try:
             self.page = self.main.opts.image_page[cfg.name]
         except KeyError:
             self.page = 0
+        log.debug(f"update image config: page={self.page} class={self.menu.target_class} errors_only={self.menu.errors_only}")
+        if self.main.data is not None:
+            self.main.data.filter(self.main.predict, self.menu.target_class, self.menu.errors_only)
 
     def update_stats(self) -> None:
         """Called to update stats data after each epoch"""
-        if self.main.data and self.main.predict is not None and self.menu.errors_only:
+        if self.main.data is not None and self.menu.errors_only:
             self.main.data.filter(self.main.predict, self.menu.target_class, self.menu.errors_only)
         self._update()
 
@@ -829,14 +846,23 @@ class ImageViewer(pg.GraphicsLayoutWidget):
         self.menu.label.setText(f"Page {self.page+1} of {self.pages}")
         self.menu.info.setText("")
         start = self.page*self.images_per_page
+
+        fnt = qw.QLabel().font()
+        fnt.setPointSize(small_font_size)
+
         for i, p in enumerate(self.plots):
             p.clear()
-            p.setTitle(self._title(start+i))
             data = self._image(start + i)
             if data is not None:
                 p.setXRange(0, data.shape[1], padding=0)
                 p.setYRange(0, data.shape[0], padding=0)
                 p.addItem(pg.ImageItem(data))
+                title = self._title(start+i)
+                add_label(p, 0, data.shape[0], title, "w", fill=True, font=fnt)
+                pred = self._prediction(start+i)
+                if pred:
+                    add_label(p, 0, 0, pred, "w", anchor=(0, 1), fill=True, font=fnt)
+
         self.main.opts.image_page[self.main.cfg.name] = self.page
         self.main.opts.save()
 
@@ -844,28 +870,32 @@ class ImageViewer(pg.GraphicsLayoutWidget):
         if not self.main.data:
             return None
         ds = self.main.data
-        if i >= ds.nitems:
+        if i >= len(ds):
             return None
-        img = ds.get(i, ds.data)
+        img = ds[i][0]
         img = img.view(1, *img.shape)
         if self.menu.transformed and self.main.transform:
             img = self.main.transform(img)
+        elif ds.transform is not None:
+            img = ds.transform(img)
         return to_image(img)
 
     def _title(self, i: int) -> str:
-        if not self.main.data:
+        if not self.main.data or i >= len(self.main.data):
             return ""
         ds = self.main.data
-        s = ""
-        if i < ds.nitems:
-            s = f"{ds.indexOf(i)}:"
-            if self.main.predict is not None:
-                pred = int(ds.get(i, self.main.predict))
-                s += ds.classes[pred]
-        if platform.system() == "Linux":
-            return f"<pre><font size=2>{s:<16}</font></pre>"
+        ix = ds.index_of(i)
+        return str(ix)+":" + ds.classes[ds.targets[ix]]
+
+    def _prediction(self, i: int) -> str:
+        if not self.main.data or i >= len(self.main.data) or self.main.predict is None:
+            return ""
+        ds = self.main.data
+        ix = ds.index_of(i)
+        if ix < len(self.main.predict):
+            return ds.classes[self.main.predict[ix]]
         else:
-            return f"<pre>{s:<16}</pre>"
+            return ""
 
 
 class LayerList(qw.QListWidget):
@@ -930,10 +960,12 @@ class Histograms(qw.QWidget):
         cols.addWidget(self.layers)
         self.setLayout(cols)
 
-    def update_config(self, cfg: Config, model: Model) -> None:
+    def update_config(self, cfg: Config, model: nn.Module) -> None:
         """Called when new config file is loaded"""
         self.histograms.clear()
         self.model_name = cfg.name
+        if not isinstance(model, Model):
+            return
         names = model.layer_names()
         try:
             enabled = self.main.opts.histogram_layers[cfg.name]
@@ -942,7 +974,7 @@ class Histograms(qw.QWidget):
             self.main.opts.histogram_layers[cfg.name] = enabled
             self.main.opts.save()
         self.layers.set_layers(names, enabled)
-        log.debug(f"init histogram layers: {[str(ix)+':'+name for ix, name in names]} {[str(ix) for ix in enabled]}")
+        # log.debug(f"init histogram layers: {[str(ix)+':'+name for ix, name in names]} {[str(ix) for ix in enabled]}")
 
     def _select_layer(self, item):
         selected = self.layers.selected()
@@ -1024,10 +1056,12 @@ class Activations(qw.QWidget):
         cols.addWidget(self.layers)
         self.setLayout(cols)
 
-    def update_config(self, cfg: Config, model: Model) -> None:
+    def update_config(self, cfg: Config, model: nn.Module) -> None:
         """Called when new config file is loaded"""
         self.activations.clear()
         self.model_name = cfg.name
+        if not isinstance(model, Model):
+            return
         if self.main.data:
             self.plots.set_model(self.main.data.classes)
         names = model.layer_names()
@@ -1040,19 +1074,22 @@ class Activations(qw.QWidget):
                     enabled.append(ix)
             self.main.opts.activation_layers[cfg.name] = enabled
             self.main.opts.save()
-        log.debug(f"init activation layers: {[str(ix)+':'+name for ix, name in names]} {[str(ix) for ix in enabled]}")
+        # log.debug(f"init activation layers: {[str(ix)+':'+name for ix, name in names]} {[str(ix) for ix in enabled]}")
         self.layers.set_layers(names, enabled)
         self.index = self.main.opts.activation_index.get(cfg.name, 0)
 
     @property
     def samples(self) -> int:
-        if self.main.data:
-            return min(self.main.data.nitems, self.main.data.batch_size)
+        if self.main.data and self.main.cfg:
+            batch_size = self.main.cfg.data("test").get("batch_size", len(self.main.data))
+            return min(len(self.main.data), batch_size)
         else:
             return 0
 
     def get_activations(self, layers: list[Index], index: int) -> dict[Index, Tensor]:
         """Get activations tensor for given image"""
+        if len(self.layers.indexes) == 0:
+            return {}
         out_layer = self.layers.indexes[-1]
         if out_layer not in layers:
             layers.append(out_layer)
@@ -1076,6 +1113,8 @@ class Activations(qw.QWidget):
     def _select_layer(self, item):
         selected = self.layers.selected()
         activations = self.get_activations(selected, self.index)
+        if not activations:
+            return
         self.plots.update_plots(activations, selected, self.layers.indexes[-1])
         self.main.opts.activation_layers[self.model_name] = selected
         self.main.opts.save()
@@ -1092,7 +1131,7 @@ class Activations(qw.QWidget):
 
     def filter(self) -> None:
         """callback from ImageMenu """
-        if self.main.data and self.main.predict is not None:
+        if self.main.data is not None:
             self.main.data.filter(self.main.predict, self.menu.target_class, self.menu.errors_only)
         self._update_plots()
 
@@ -1103,7 +1142,7 @@ class Activations(qw.QWidget):
     def update_stats(self) -> None:
         """Called to update stats data after each epoch"""
         self.activations.clear()
-        if self.main.data and self.main.predict is not None and self.menu.errors_only:
+        if self.main.data is not None and self.menu.errors_only:
             self.main.data.filter(self.main.predict, self.menu.target_class, self.menu.errors_only)
         self._update_plots()
 
@@ -1113,6 +1152,8 @@ class Activations(qw.QWidget):
         log.debug(f"update activation plots for {self.model_name}:{self.index}")
         selected = self.layers.selected()
         activations = self.get_activations(selected, self.index)
+        if not activations:
+            return
         self.menu.label.setText(f"Image {self.effective_index+1} of {self.samples}")
         ds = self.main.data
         tgt = ds.targets[self.index]
@@ -1154,7 +1195,6 @@ class PlotGrids(qw.QWidget):
         self.layer_state: list[Index] = []
         self.layers: dict[Index, PlotGrid] = {}
         self.cmap = cmap
-        self.classes = None
         self._layout = PlotLayout()
         self.setLayout(self._layout)
 
@@ -1167,6 +1207,7 @@ class PlotGrids(qw.QWidget):
 
     def update_plots(self, activations: dict[Index, Tensor], layers: list[Index], out_layer: Index) -> None:
         """update the grids to display the new activation tensors"""
+        self.out_layer = out_layer
         self.table.set_outputs(activations[out_layer][0])
         if layers == self.layer_state:
             log.debug(f"update plots: index={layers}")
@@ -1188,7 +1229,7 @@ class PlotGrids(qw.QWidget):
             grid = self.layers[ix]
             grid.set_data(data)
         except KeyError:
-            labels = self.classes if ix == self.layer_state[-1] else None
+            labels = self.classes if ix == self.out_layer and len(self.classes) <= 10 else None
             is_rgb = (ix == Index((0,)) and data.shape[0] == 3)
             grid = PlotGrid(data, cmap=self.cmap, xlabels=labels, rgbimage=is_rgb)
             self.layers[ix] = grid
@@ -1201,9 +1242,12 @@ class OutputTable(qw.QTableWidget):
     def __init__(self, classes: list[str]):
         super().__init__()
         self.setColumnCount(2)
+        self.setColumnWidth(0, 200)
+        self.setColumnWidth(1, 50)
         self.setRowCount(1)
         self.setHorizontalHeaderLabels(["class", "prob%"])
         self.classes = classes
+        self.setSizePolicy(qw.QSizePolicy.Expanding, qw.QSizePolicy.Preferred)  # type: ignore
 
     def _update(self, rows):
         self.clearContents()
@@ -1224,7 +1268,7 @@ class OutputTable(qw.QTableWidget):
         self._update(rows)
 
     def size_hint(self):
-        return 215, 25+30*self.rowCount()
+        return 275, 25+30*self.rowCount()
 
 
 class PlotGrid(pg.PlotWidget):
@@ -1607,10 +1651,13 @@ def update_range(p, max_epoch, yvals):
         p.setYRange(min(miny, y0), max(maxy, y1))
 
 
-def add_label(plot, x, y, val, col):
-    text = pg.TextItem(f"{val:.0f}", color=col)
+def add_label(plot, x, y, text, col, anchor=(0, 0), fill=False, font=None, base=False):
+    fill_with = pg.mkBrush(menu_bgcolor) if fill else None
+    text = pg.TextItem(text, anchor=anchor, color=col, fill=fill_with)
+    if font is not None:
+        text.setFont(font)
     plot.addItem(text)
-    text.setPos(x+0.3, y+0.7)
+    text.setPos(x, y)
 
 
 def calc_grid(items: int, rows=0, square=False) -> tuple[int, int]:

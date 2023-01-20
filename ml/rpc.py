@@ -14,8 +14,8 @@ from torch import nn
 
 from .config import Config, Index
 from .database import Database, State
-from .dataset import DataLoader, Dataset, Transforms
-from .model import Model
+from .dataset import Dataset, Loader, Transforms
+from .model import Model, load_model
 from .trainer import Stats, Trainer
 from .utils import (InvalidConfigError, RunInterrupted, load_checkpoint,
                     set_logdir, set_seed)
@@ -26,12 +26,25 @@ zmq_port = 5555
 @dataclass
 class Data:
     cfg: Config
-    model: Model
-    loader: DataLoader
+    model: nn.Module
     train: Dataset
     test: Dataset
     valid: Dataset | None
-    transform: Transforms | None
+    train_loader: Loader
+    test_loader: Loader
+    valid_loader: Loader | None
+
+    def start(self, max_items: int = 0):
+        self.train_loader.start(self.train, max_items)
+        self.test_loader.start(self.test, max_items)
+        if self.valid is not None and self.valid_loader is not None:
+            self.valid_loader.start(self.valid, max_items)
+
+    def shutdown(self):
+        self.train_loader.shutdown()
+        self.test_loader.shutdown()
+        if self.valid is not None and self.valid_loader is not None:
+            self.valid_loader.shutdown()
 
 
 class BaseContext:
@@ -57,46 +70,46 @@ class BaseContext:
 
     def load_config(self, cfg: Config, verbose: bool = False) -> None:
         set_logdir(cfg.dir)
+        is_cuda = self.device.startswith("cuda")
         train_data = cfg.dataset(self.args.datadir, "train")
+        train_loader = cfg.dataloader("train", pin_memory=is_cuda)
         log.info(f"== train data: ==\n{train_data}")
-        test_data = cfg.dataset(self.args.datadir, "test", device=self.device)
+        test_data = cfg.dataset(self.args.datadir, "test")
+        test_loader = cfg.dataloader("test", pin_memory=is_cuda)
         log.info(f"== test data: ==\n{test_data}")
         if cfg.data("valid"):
-            valid_data = cfg.dataset(self.args.datadir, "valid", device=self.device)
+            valid_data = cfg.dataset(self.args.datadir, "valid")
+            valid_loader = cfg.dataloader("valid", pin_memory=is_cuda)
             log.info(f"== valid data: ==\n{valid_data}")
         else:
             valid_data = None
-        transforms = cfg.transforms("train")
-        if transforms is not None:
-            log.info(f"== transforms: ==\n{transforms}")
-        loader = DataLoader(pin_memory=True)
-        model = Model(cfg, test_data.image_shape, device=self.device)
+            valid_loader = None
+        model = load_model(cfg, test_data.image_shape(), device=self.device)
         if verbose:
             log.info(str(model))
-        self.data = Data(cfg, model, loader, train_data, test_data, valid_data, transforms)
+        self.data = Data(cfg, model, train_data, test_data, valid_data, train_loader, test_loader, valid_loader)
 
     def restart(self, clear_files: bool = False) -> bool:
-        if not self.data:
+        if not self.data or not isinstance(self.data.model, Model):
             return False
         self.cfg.save(clear=clear_files)
         set_seed(self.cfg.seed)
         self.data.model.init_weights()
         self.trainer = Trainer(self.cfg, self.data.model, device=self.device)
         self.stats = Stats()
-        self.stats.xrange = [1, self.trainer.epochs]
-        self.data.loader.start(self.data.train, self.cfg.shuffle(), self.data.transform, seed=self.cfg.seed)
+        self.stats.xrange = [1, self.cfg.epochs]
+        self.data.start(self.args.max_items)
         return True
 
     def resume(self, epoch: int) -> bool:
-        if not self.data:
+        if not self.data or not isinstance(self.data.model, Model):
             return False
         self.cfg.save()
         self.trainer = Trainer(self.cfg, self.data.model, device=self.device)
         self.stats = self.trainer.resume_from(epoch)
         if self.stats.current_epoch != epoch:
             raise RuntimeError(f"invalid checkpoint: epoch is {self.stats.current_epoch} - expected {epoch}")
-        # TODO load saved seed in inloader
-        self.data.loader.start(self.data.train, self.cfg.shuffle(), self.data.transform)
+        self.data.start(self.args.max_items)
         return True
 
     def do_epoch(self, should_stop: Callable | None = None) -> bool:
@@ -104,14 +117,17 @@ class BaseContext:
         if not self.trainer or not self.data:
             return True
         try:
-            train_loss = self.trainer.train(self.data.loader, should_stop=should_stop)
-            if self.data.valid:
-                valid_loss, valid_accuracy = self.trainer.test(self.data.valid, should_stop=should_stop)
+            train_loss = self.trainer.train(
+                self.data.train_loader, self.data.train.transform, should_stop=should_stop)
+            if self.data.valid is not None and self.data.valid_loader is not None:
+                valid_loss, valid_accuracy = self.trainer.test(
+                    self.data.valid_loader, self.data.valid.transform, should_stop=should_stop)
             else:
                 valid_loss, valid_accuracy = None, None
-            test_loss, test_accuracy = self.trainer.test(self.data.test, should_stop=should_stop)
+            test_loss, test_accuracy = self.trainer.test(
+                self.data.test_loader, self.data.test.transform, should_stop=should_stop)
         except RunInterrupted:
-            self.data.loader.shutdown()
+            self.data.shutdown()
             self.trainer.save(self.stats)
             return True
 
@@ -130,8 +146,8 @@ class BaseContext:
         if stop or (self.epoch % (10*self.trainer.log_every) == 0):
             log.info(f"  Elapsed time = {self.stats.elapsed_total()}")
         if stop:
-            self.data.loader.shutdown()
-            self.epochs = clear_checkpoints(self.epoch, self.cfg.dir)
+            self.data.shutdown()
+            self.epochs = clear_checkpoints(self.epoch, self.trainer.save_every, self.cfg.dir)
         return stop
 
     def run(self, profile=None) -> None:
@@ -144,7 +160,7 @@ class CmdContext(BaseContext):
     def run(self, profile=None) -> None:
         try:
             cfg = Config(file=self.args.config, rundir=self.args.rundir, epochs=self.args.epochs, seed=self.args.seed)
-            self.load_config(cfg, verbose=True)
+            self.load_config(cfg)
         except (InvalidConfigError, FileNotFoundError) as err:
             print(f"error in config file '{self.args.config}': {err}")
             sys.exit(1)
@@ -244,16 +260,18 @@ class Server(BaseContext):
             self.start(state.epoch, False)
 
     def get_model(self) -> Model | None:
-        if self.started and self.trainer:
+        if self.started and self.trainer and isinstance(self.trainer.model, Model):
             return self.trainer.model
         if not self.data:
             return None
-        model = Model(self.cfg, self.data.test.image_shape, device=self.device)
+        model = load_model(self.cfg, self.data.test.image_shape(), device=self.device)
+        if not isinstance(model, Model):
+            return None
         try:
             checkpoint = load_checkpoint(self.cfg.dir, device=self.device)
             model.load_state_dict(checkpoint["model_state_dict"])
         except FileNotFoundError:
-            model.init_weights()
+            pass
         return model
 
     def get_activations(self, name: str, layers: list[Index], index: int = 0, hist_bins: int = 0,
@@ -263,10 +281,15 @@ class Server(BaseContext):
         if not self.data or not model:
             self.error("config not loaded")
             return
+        ds = self.data.test
         if name == "ml:activations":
-            input = self.data.test.data[index:index+1]
+            input = ds.get_data(index).view((1,)+ds.size)
         else:
-            input = self.data.test[0][0]
+            batch_size = self.cfg.data("test").get("batch_size", len(ds))
+            input = ds.get_range(0, batch_size, nofilter=True)[0]
+        input = input.to(self.device)
+        if ds.transform is not None:
+            input = ds.transform(input)
         layers = [Index(i) for i in layers]
         activations = model.activations(input, layers, hist_bins=hist_bins)
         for layer, val in activations.items():
@@ -340,21 +363,15 @@ class Client:
         return status[0], status[1]
 
 
-def clear_checkpoints(last_epoch: int, dir: str) -> list[int]:
+def clear_checkpoints(last_epoch: int, save_every: int, dir: str) -> list[int]:
     """Remove old checkpoint files from previous runs and return current epoch list"""
-    config_file = path.join(dir, "config.toml")
-    try:
-        start_time = path.getmtime(config_file)
-    except OSError:
-        log.warning(f"warning: error reading {config_file} - skip purge of checkpoint files")
-        start_time = 0
     epochs = []
     for file in glob(path.join(dir, "model_*.pt")):
-        if path.getmtime(file) < start_time:
-            log.debug(f"remove: {file}")
-            os.remove(file)
+        epoch = int(path.basename(file)[6:-3])
+        if epoch > last_epoch or (epoch < last_epoch and (epoch % save_every) != 0):
+            log.info(f"remove: {file}")
+            # os.remove(file)
         else:
-            epoch = int(path.basename(file)[6:-3])
             epochs.append(epoch)
     epochs.sort()
     return epochs

@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--cfgdir", default="./cfg", help="directory for config files")
     parser.add_argument("--cpu", action="store_true", default=False, help="disable CUDA training")
     parser.add_argument("--seed", type=int, default=0, help="override random seed in config if set")
+    parser.add_argument("--max_items", type=int, default=0, help="limit maximum number of items per epoch")
     parser.add_argument("--deterministic", action="store_true", default=False, help="deterministic runs with CUDA (slower)")
     parser.add_argument("--debug", action="store_true", default=False, help="debug printing")
     args = parser.parse_args()

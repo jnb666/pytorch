@@ -4,6 +4,7 @@ import math
 import os
 import random
 import statistics
+import sys
 import time
 from os import path
 from typing import Any, Callable
@@ -15,9 +16,10 @@ from torch.optim import Optimizer
 from torch.profiler import record_function
 
 from .config import Config
-from .dataset import DataLoader, Dataset
+from .dataset import Dataset, Loader, Transforms
 from .model import Model
-from .utils import InvalidConfigError, RunInterrupted, load_checkpoint, pformat
+from .utils import (InvalidConfigError, RunInterrupted, load_checkpoint,
+                    pformat, save_checkpoint)
 
 
 class Stats():
@@ -103,7 +105,7 @@ class Stopper:
     """Stopper checks whether the stopping condition is met
     Args:
         epochs      number of epochs for which average loss has not decreased
-        extra       number of extra epochs after stopping condition is met - transform is disabled for these
+        extra       number of extra epochs after stopping condition is met
         avg         number of epochs to calc the mean loss
     """
 
@@ -143,8 +145,6 @@ class Stopper:
         stats.valid_accuracy_avg.clear()
         for i in range(len(stats.valid_accuracy)):
             stats.valid_accuracy_avg.append(mean(stats.valid_accuracy, i, self.avg))
-        log.debug(f"valid accuracy:{np.array(stats.valid_accuracy)}")
-        log.debug(f"valid average: {np.array(stats.valid_accuracy_avg)}")
 
 
 class Trainer:
@@ -170,7 +170,7 @@ class Trainer:
         stopper:Stopper      optional object to check if should stop after this epoch
     """
 
-    def __init__(self, cfg: Config, model: Model, loss_fn=None, device: str = "cpu"):
+    def __init__(self, cfg: Config, model: nn.Module, loss_fn=None, device: str = "cpu"):
         self.cfg = cfg
         self.dir = cfg.dir
         self.device = device
@@ -208,9 +208,6 @@ class Trainer:
     def save(self, stats: Stats) -> None:
         """Save current model, optimizer, scheduler state and stats to file"""
         checkpoint = {
-            "torch_rng_state": torch.get_rng_state(),
-            "numpy_rng_state": to_list(np.random.get_state()),
-            "random_state": random.getstate(),
             "stats_state_dict": stats.state_dict(),
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -219,10 +216,7 @@ class Trainer:
             checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
         if self.cfg.half:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
-        file = path.join(self.dir, f"model_{stats.current_epoch}.pt")
-        log.debug(f"save checkpoint to {file}")
-        torch.save(checkpoint, file)
-        link(file, path.join(self.dir, "model.pt"))
+        save_checkpoint(self.dir, stats.current_epoch, checkpoint)
 
     def resume_from(self, epoch: int) -> Stats:
         """Load saved stats, weights and random state from checkpoint file"""
@@ -233,24 +227,29 @@ class Trainer:
         stats.current_epoch = epoch
         stats.xrange[1] = max(stats.xrange[1], self.epochs)
         self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if self.scheduler:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        if self.cfg.half:
-            self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        try:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if self.scheduler:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            if self.cfg.half:
+                self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        except KeyError as err:
+            log.warning(f"skip load for {err}")
         if self.stopper:
             self.stopper.update_stats(stats)
         return stats
 
-    def train(self, train_data: DataLoader, should_stop: Callable | None = None) -> float:
+    def train(self, train_data: Loader, transform: Transforms | None = None,
+              should_stop: Callable | None = None) -> float:
         """Train one epoch against training dataset - returns training loss"""
         self.model.train()
         train_loss = 0.0
-        iterator = iter(train_data)
-        for i in range(len(train_data)):
+        batches = len(train_data)
+        for i, (data, targets, id) in enumerate(train_data):
             with record_function(f"--training:get_data--"):
-                data, targets = next(iterator)
                 data = data.to(self.device, non_blocking=True)
+                if transform:
+                    data = transform(data)
                 targets = targets.to(self.device, non_blocking=True)
             with record_function(f"--training:forward--"):
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
@@ -258,16 +257,22 @@ class Trainer:
                     loss = self.loss_fn(pred, targets)
             with record_function(f"--training:backward--"):
                 self.scaler.scale(loss).backward()
+                del data, targets
+                train_data.release(id)
             with record_function(f"--training:update_loss--"):
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
-                train_loss += float(loss)
+                loss_val = float(loss)
+                if not math.isnan(loss_val):
+                    train_loss += (loss_val - train_loss) / (i+1)
+            sys.stdout.write(f"train batch {i+1} / {batches} : loss={train_loss:.3f}  \r")
             if should_stop and should_stop(train=True):
                 raise RunInterrupted()
-        return train_loss / len(train_data)
+        return train_loss
 
-    def test(self, test_data: Dataset, should_stop: Callable | None = None) -> tuple[float, float]:
+    def test(self, test_data: Loader, transform: Transforms | None = None,
+             should_stop: Callable | None = None) -> tuple[float, float]:
         """Calculate loss and accuracy against the test set - returns test loss and accuracy"""
         with record_function(f"--testing--"):
             self.model.eval()
@@ -276,21 +281,32 @@ class Trainer:
             test_loss = 0.0
             total_correct = 0
             samples = 0
+            iterator = iter(test_data)
+            batches = len(test_data)
             with torch.no_grad():
-                for data, targets in test_data:
-                    data, targets = data.to(self.device), targets.to(self.device)
+                for i, (data, targets, id) in enumerate(test_data):
+                    data = data.to(self.device, non_blocking=True)
+                    if transform:
+                        data = transform(data)
+                    targets = targets.to(self.device, non_blocking=True)
                     with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                         pred = self.model(data)
                         loss = self.loss_fn(pred, targets)
                     outputs = pred.argmax(1)
                     correct = int((outputs == targets).type(torch.float).sum())
-                    self.predict[samples: samples+len(targets)] = outputs
-                    test_loss += float(loss)
+                    nitems = len(targets)
+                    del data, targets
+                    test_data.release(id)
+                    self.predict[samples: samples+nitems] = outputs
+                    loss_val = float(loss)
+                    if not math.isnan(loss_val):
+                        test_loss += (loss_val - test_loss) / (i+1)
                     total_correct += correct
-                    samples += len(targets)
-                if should_stop and should_stop():
-                    raise RunInterrupted()
-            return test_loss/len(test_data), total_correct/samples
+                    samples += nitems
+                    sys.stdout.write(f"test batch {i+1} / {batches} : loss={test_loss:.3f}    \r")
+                    if should_stop and should_stop():
+                        raise RunInterrupted()
+            return test_loss, total_correct/samples
 
     def step(self, stats: Stats) -> None:
         """If scheduler is defined then call it's step function"""
@@ -311,22 +327,20 @@ class Trainer:
             return stop
 
 
-def link(file, link):
-    try:
-        os.remove(link)
-    except FileNotFoundError:
-        pass
-    os.link(file, link)
-
-
-def to_list(tuple):
-    res = []
-    for x in tuple:
-        if isinstance(x, np.ndarray):
-            res.append(x.tolist())
-        else:
-            res.append(x)
-    return res
+def calc_initial_stats(cfg: Config, model: nn.Module, test_data: Dataset, device: str = "cpu") -> Stats:
+    """Do test run to calc stats for pre-trained model"""
+    log.info(f"calc initial test stats for model  device={device}")
+    stats = Stats()
+    trainer = Trainer(cfg, model, device=device)
+    is_cuda = device.startswith("cuda")
+    test_loader = cfg.dataloader("test", pin_memory=is_cuda)
+    test_loader.start(test_data)
+    test_loss, test_accuracy = trainer.test(test_loader)
+    log.info(f"Test loss: {test_loss:.3f} accuracy: {test_accuracy:.1%}")
+    stats.predict = trainer.predict
+    stats.update(0.0, 0.0, test_loss, test_accuracy)
+    test_loader.shutdown()
+    return stats
 
 
 def mean(vals: list[float], i: int, avg: int) -> float:

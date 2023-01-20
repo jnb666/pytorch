@@ -6,24 +6,27 @@ dataset = "CIFAR10"
 train = true
 batch_size = 128
 shuffle = true
-normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 transform = [
   ["RandomHorizontalFlip"],
-  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }]
+  ["RandomCrop", { size=[32,32], padding=4, padding_mode="reflect", resample="NEAREST" }],
+  ["Normalize", [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
 ]
 
 [test_data]
 dataset = "CIFAR10"
 batch_size = 500
 end = 5000
-normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
-
+transform = [
+  ["Normalize", [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+]
 
 [valid_data]
 dataset = "CIFAR10"
 start = 5000
 batch_size = 500
-normalize = [[0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+transform = [
+  ["Normalize", [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]]
+]
 
 [model]
 conv = [

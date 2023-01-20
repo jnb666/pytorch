@@ -1,11 +1,15 @@
 [train_data]
 dataset = "MNIST"
 train = true
-normalize = [[0.1307], [0.3081]]
+transform = [
+  ["Normalize", 0.1307, 0.3081],
+]
 
 [test_data]
 dataset = "MNIST"
-normalize = [[0.1307], [0.3081]]
+transform = [
+  ["Normalize", 0.1307, 0.3081],
+]
 
 [model]
 layers = [

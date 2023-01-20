@@ -4,14 +4,15 @@ from glob import glob
 from os import path
 from typing import Any
 
-import kornia as K
 import tomli
 import torch
 import torchvision  # type: ignore
 import torchvision.transforms.functional as F  # type: ignore
 from torch import Tensor, nn
 
-from .dataset import DataLoader, Dataset, Transforms
+from .dataset import (Dataset, ImagenetDataset, LMDBDataset, Loader,
+                      MultiProcessLoader, SingleProcessLoader, TensorDataset,
+                      Transforms)
 from .scheduler import StepLRandWeightDecay
 from .utils import InvalidConfigError, pformat
 
@@ -140,33 +141,34 @@ class Config():
             raise InvalidConfigError(f"invalid dataset type: {typ}")
         return cfg
 
-    def shuffle(self, typ: str = "train"):
-        return self.data(typ).get("shuffle", False)
-
     def dataset(self, root: str, typ: str = "test", device: str = "cpu") -> Dataset:
-        """Load a new train, test or valid dataset and applies normalization if defined.
-
-        Raises InvalidConfigError if it does not exist
-        """
+        """Load a new train, test or valid dataset using config from the [*_data] section"""
         cfg = self.data(typ)
         if len(cfg) == 0:
             raise InvalidConfigError(f"{typ} dataset configuration not found")
-        train = cfg.get("train", False)
-        batch_size = cfg.get("batch_size", 0)
+        name = cfg.get("dataset", "")
+        is_train = cfg.get("train", False)
+        transforms = self.transforms(typ)
         start = cfg.get("start", 0)
         end = cfg.get("end", 0)
-        ds = Dataset(cfg["dataset"], root, train=train, batch_size=batch_size,
-                     device=device, start=start, end=end)
-        try:
-            args = cfg["normalize"]
-            log.debug(f"normalize: {args}")
-            try:
-                ds.data = F.normalize(ds.data, args[0], args[1], inplace=True)
-            except (TypeError, IndexError) as err:
-                raise InvalidConfigError(f"normalize: {err}")
-        except KeyError:
-            pass
-        return ds
+        resize = cfg.get("resize", 256)
+        lmdb_dir = path.join(root, "lmdb", name, "train" if is_train else "test", str(resize))
+        if path.exists(lmdb_dir):
+            return LMDBDataset(name, root, transforms, resize, train=is_train, device=device, start=start, end=end)
+        elif name == "Imagenet":
+            return ImagenetDataset(root, transforms, resize, train=is_train, device=device, start=start, end=end)
+        else:
+            return TensorDataset(name, root, transforms, train=is_train, device=device, start=start, end=end)
+
+    def dataloader(self, typ: str = "test", pin_memory: bool = False) -> Loader:
+        """ Get a new data loader based on data config section"""
+        cfg = self.data(typ)
+        batch_size = cfg.get("batch_size", 0)
+        shuffle = cfg.get("shuffle", False)
+        if cfg.get("multi_process"):
+            return MultiProcessLoader(batch_size, shuffle, pin_memory)
+        else:
+            return SingleProcessLoader(batch_size, shuffle, pin_memory)
 
     def transforms(self, typ: str = "train") -> Transforms | None:
         """Get the transforms defined on the image tensor from Kornia data augmentations"""

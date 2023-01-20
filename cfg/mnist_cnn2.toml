@@ -6,10 +6,10 @@ train = true
 end = 50000
 batch_size = 256
 shuffle = true
-normalize = [[0.1307], [0.3081]]
 transform = [
   ["RandomAffine", { p=0.5, degrees=15, scale=[0.85,1.15], padding_mode="reflection" }],
   ["RandomElasticTransform", { p=0.5, kernel_size=[9,9], sigma=[4.0,4.0], alpha=[0.5,0.5], padding_mode="reflection" }],
+  ["Normalize", 0.1307, 0.3081],
 ]
 
 [valid_data]
@@ -17,12 +17,16 @@ dataset = "MNIST"
 train = true
 start = 50000
 batch_size = 1000
-normalize = [[0.1307], [0.3081]]
+transform = [
+  ["Normalize", 0.1307, 0.3081],
+]
 
 [test_data]
 dataset = "MNIST"
 batch_size = 1000
-normalize = [[0.1307], [0.3081]]
+transform = [
+  ["Normalize", 0.1307, 0.3081],
+]
 
 [model]
 layers = [
