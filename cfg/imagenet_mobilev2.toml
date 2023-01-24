@@ -10,7 +10,6 @@ transform = [
   ["RandomCrop", [224, 224]],
   ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
 ]
-multi_process = true
 
 [test_data]
 dataset = "Imagenet"
@@ -20,7 +19,6 @@ transform = [
   ["CenterCrop", 224],
   ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
 ]
-multi_process = true
 
 [model]
 model = ["mobilenet_v2", {weights="IMAGENET1K_V2"}]

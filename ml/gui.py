@@ -186,9 +186,9 @@ class MainWindow(qw.QWidget):
         self.menu.currentItemChanged.connect(self._select_page)
         self.menu.setCurrentRow(0)
 
-    def update_config(self, name: str, version: str = "", running: bool = False) -> None:
+    def update_config(self, name: str, version: str = "") -> None:
         """Load new model definition"""
-        log.debug(f"update_config: {name} version={version} running={running}")
+        log.debug(f"update_config: {name} version={version}")
         try:
             self.cfg, self.model, self.data, self.transform = self.loader.load_config(name, version)
         except (InvalidConfigError, FileNotFoundError) as err:
@@ -508,13 +508,20 @@ class StatsPlots(qw.QWidget):
         self.plots.clear()
         self.plot1 = self.plots.addPlot(row=0, col=0)
         self.plot1.showGrid(x=True, y=True, alpha=0.75)
+        self.plot1.getAxis("left").setWidth(50)
         self.plot2 = self.plots.addPlot(row=1, col=0)
         self.plot2.showGrid(x=True, y=True, alpha=0.75)
-        init_plot(self.plot1, ylabel="cross entropy loss", legend=(0, 1),
-                  xrange=[1, self.main.epochs], yrange=[0, 1], mouse=True)
-        init_plot(self.plot2, xlabel="epoch", ylabel="accuracy",
-                  xrange=[1, self.main.epochs], yrange=[0, 1], mouse=True)
-        self.plot2.getViewBox().setXLink(self.plot1.getViewBox())
+        self.plot2.getAxis("left").setWidth(50)
+        self.plot3 = self.plots.addPlot(row=2, col=0)
+        self.plot3.showGrid(x=True, y=True, alpha=0.75)
+        self.plot3.getAxis("left").setWidth(50)
+        init_plot(self.plot1, xlabel="epoch", ylabel="cross entropy loss", legend=(0, 1),
+                  xrange=[0, self.main.epochs], yrange=[0, 2], mouse=True)
+        init_plot(self.plot2, xlabel="epoch", ylabel="accuracy", legend=(0, 1),
+                  xrange=[0, self.main.epochs], yrange=[0, 1.05], mouse=True)
+        init_plot(self.plot3, xlabel="cross entropy loss",
+                  xrange=[0, 2], yrange=[0, 100], mouse=True)
+        self.plot1.setXLink(self.plot2.getViewBox())
         self.line1: list[pg.PlotDataItem] = []
         self.line2: list[pg.PlotDataItem] = []
 
@@ -524,8 +531,12 @@ class StatsPlots(qw.QWidget):
         if stats.valid_loss:
             y1.append(stats.valid_loss)
         y2 = [stats.test_accuracy]
+        if len(stats.test_top5_accuracy):
+            y2.append(stats.test_top5_accuracy)
         if stats.valid_accuracy:
             y2.append(stats.valid_accuracy)
+        if len(stats.valid_top5_accuracy):
+            y2.append(stats.valid_top5_accuracy)
         if stats.valid_accuracy_avg:
             y2.append(stats.valid_accuracy_avg)
         update_range(self.plot1, stats.current_epoch+1, y1)
@@ -545,11 +556,23 @@ class StatsPlots(qw.QWidget):
             if len(stats.valid_loss):
                 self.line1.append(add_line(self.plot1, stats.epoch, stats.valid_loss, color="y", name="validation"))
             self.line2.clear()
-            self.line2.append(add_line(self.plot2, stats.epoch, stats.test_accuracy, color="g", name="testing"))
+            self.line2.append(add_line(self.plot2, stats.epoch, stats.test_accuracy, color="g", name="top 1 test"))
+            if len(stats.test_top5_accuracy):
+                self.line2.append(add_line(self.plot2, stats.epoch, stats.test_top5_accuracy, color="c", name="top 5 test"))
             if len(stats.valid_accuracy):
-                self.line2.append(add_line(self.plot2, stats.epoch, stats.valid_accuracy, color="y", name="validation"))
+                self.line2.append(add_line(self.plot2, stats.epoch, stats.valid_accuracy, color="y", name="top 1 valid"))
+            if len(stats.valid_top5_accuracy):
+                self.line2.append(add_line(self.plot2, stats.epoch, stats.valid_top5_accuracy, color="r", name="top 5 valid"))
             if len(stats.valid_accuracy_avg):
                 self.line2.append(add_line(self.plot2, stats.epoch, stats.valid_accuracy_avg, color="y", dash=True))
+        log.debug("updating histogram")
+        self.plot3.clear()
+        if len(stats.batch_loss):
+            y, x = np.histogram(stats.batch_loss[-1].cpu().numpy(), bins=100)
+            self.plot3.clear()
+            self.plot3.setXRange(x[0], x[-1], padding=0)
+            self.plot3.setYRange(0, np.max(y)*1.02, padding=0)
+            self.plot3.plot(x, y, stepMode="center", fillLevel=0, fillOutline=True, brush=(0, 0, 255, 150))
 
     def _update_table(self, stats: Stats) -> None:
         """update stats table"""
@@ -1259,12 +1282,12 @@ class OutputTable(qw.QTableWidget):
     def set_outputs(self, outputs: Tensor):
         log.debug(f"set_outputs: {outputs.shape}")
         prob = F.softmax(outputs.to(device="cpu", dtype=torch.float32), dim=0)
-        rows = []
+        rows: list[tuple[str, str]] = []
         for i in torch.argsort(prob, descending=True).tolist():
             val = prob[i].item()
-            if val < 0.05:
+            if val < 0.01 or len(rows) >= 5:
                 break
-            rows.append((self.classes[i], f"{val:.1%}"))
+            rows.append((self.classes[i], f"{100*val:.1f}"))
         self._update(rows)
 
     def size_hint(self):

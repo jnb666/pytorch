@@ -1,0 +1,95 @@
+version = 1
+half = true
+
+[train_data]
+dataset = "Imagenet"
+train = true
+batch_size = 128
+shuffle = true
+resize = 232
+transform = [
+  ["RandomCrop", [224, 224]],
+  ["RandomHorizontalFlip"],
+  ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
+]
+multi_process = true
+
+[test_data]
+dataset = "Imagenet"
+batch_size = 200
+resize = 232
+transform = [
+  ["CenterCrop", 224],
+  ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
+]
+multi_process = true
+
+[model]
+block = [
+  ["Conv2d", "$nout", 1, {bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU", {inplace=true}],
+  ["Conv2d", "$nout", 3, {stride="$stride", padding=1, bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU", {inplace=true}],
+  ["Conv2d", "$expand", 1, {bias=false}],
+  ["BatchNorm2d"],
+]
+
+shortcut = [
+  ["Conv2d", "$expand", 1, {stride="$stride", bias=false}],
+  ["BatchNorm2d"],
+]
+
+empty = []
+
+block1 = [
+  ["AddBlock", "block", "shortcut", {nout="$nout", expand="$expand", stride="$stride"}],
+  ["ReLU"],
+]
+
+block2 = [
+  ["AddBlock", "block", "empty", {nout="$nout", expand="$expand", stride="$stride"}],
+  ["ReLU"],
+]
+
+layers = [
+  ["Conv2d", 64, 7, {stride=2, padding=3, bias=false}],
+  ["BatchNorm2d"],
+  ["ReLU", {inplace=true}],
+  ["MaxPool2d", 3, {stride=2, padding=1}],
+
+  ["block1", {nout=64, expand=256, stride=1}],
+  ["block2", {nout=64, expand=256, stride=1}],
+  ["block2", {nout=64, expand=256, stride=1}],
+
+  ["block1", {nout=128, expand=512, stride=2}],
+  ["block2", {nout=128, expand=512, stride=1}],
+  ["block2", {nout=128, expand=512, stride=1}],
+  ["block2", {nout=128, expand=512, stride=1}],
+
+  ["block1", {nout=256, expand=1024, stride=2}],
+  ["block2", {nout=256, expand=1024, stride=1}],
+  ["block2", {nout=256, expand=1024, stride=1}],
+  ["block2", {nout=256, expand=1024, stride=1}],
+  ["block2", {nout=256, expand=1024, stride=1}], 
+  ["block2", {nout=256, expand=1024, stride=1}],
+
+  ["block1", {nout=512, expand=2048, stride=2}],
+  ["block2", {nout=512, expand=2048, stride=1}],
+  ["block2", {nout=512, expand=2048, stride=1}],
+
+  ["AdaptiveAvgPool2d", [1, 1]],
+  ["Flatten"],
+  ["Linear", 1000],
+]
+
+[weight_init]
+Linear = ["normal", {std=0.01}]
+Conv2d = ["kaiming_normal", {mode="fan_out", nonlinearity="relu"}]
+
+[train]
+optimizer = ["SGD", {lr=0.1, momentum=0.9, nesterov=true, weight_decay=4e-5} ]
+scheduler = ["CosineAnnealingLR", {T_max=200} ]
+epochs = 200
+save_every = 5

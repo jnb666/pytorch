@@ -42,6 +42,7 @@ class Loader:
     def _load_config(self, cfg: Config) -> tuple[Config, nn.Module, Dataset, Transforms | None]:
         log.debug(f"load_config: {cfg.name} version={cfg.version}")
         data = cfg.dataset(self.datadir, "test")
+        data.open()
         transform = cfg.transforms("train")
         model = load_model(cfg, data.image_shape(), device=self.device)
         return cfg, model, data, transform

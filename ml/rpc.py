@@ -117,24 +117,28 @@ class BaseContext:
         if not self.trainer or not self.data:
             return True
         try:
-            train_loss = self.trainer.train(
-                self.data.train_loader, self.data.train.transform, should_stop=should_stop)
+            train_loss, batch_loss = self.trainer.train(
+                self.data.train_loader, self.data.train.transform, should_stop=should_stop
+            )
+            calc_top5 = (len(self.data.test.classes) >= 100)
             if self.data.valid is not None and self.data.valid_loader is not None:
-                valid_loss, valid_accuracy = self.trainer.test(
-                    self.data.valid_loader, self.data.valid.transform, should_stop=should_stop)
-            else:
-                valid_loss, valid_accuracy = None, None
-            test_loss, test_accuracy = self.trainer.test(
-                self.data.test_loader, self.data.test.transform, should_stop=should_stop)
+                valid_loss, valid_accuracy, valid_top5_accuracy = self.trainer.test(
+                    self.data.valid_loader, self.data.valid.transform, calc_top5=calc_top5, should_stop=should_stop
+                )
+            test_loss, test_accuracy, test_top5_accuracy = self.trainer.test(
+                self.data.test_loader, self.data.test.transform, calc_top5=calc_top5, should_stop=should_stop
+            )
         except RunInterrupted:
             self.data.shutdown()
             self.trainer.save(self.stats)
             return True
 
-        self.stats.current_epoch += 1
+        self.stats.update_train(self.trainer.learning_rate(), train_loss, batch_loss)
+        self.stats.update_test(test_loss, test_accuracy, test_top5_accuracy)
+        if self.data.valid is not None and self.data.valid_loader is not None:
+            self.stats.update_valid(valid_loss, valid_accuracy, valid_top5_accuracy)
         self.stats.predict = self.trainer.predict
-        self.stats.update(self.trainer.learning_rate(), train_loss, test_loss,
-                          test_accuracy, valid_loss, valid_accuracy)
+
         stop = self.trainer.should_stop(self.stats)
         self.stats.running = not stop
         self.trainer.step(self.stats)
@@ -282,6 +286,7 @@ class Server(BaseContext):
             self.error("config not loaded")
             return
         ds = self.data.test
+        ds.open()
         if name == "ml:activations":
             input = ds.get_data(index).view((1,)+ds.size)
         else:
@@ -369,8 +374,8 @@ def clear_checkpoints(last_epoch: int, save_every: int, dir: str) -> list[int]:
     for file in glob(path.join(dir, "model_*.pt")):
         epoch = int(path.basename(file)[6:-3])
         if epoch > last_epoch or (epoch < last_epoch and (epoch % save_every) != 0):
-            log.info(f"remove: {file}")
-            # os.remove(file)
+            log.debug(f"remove: {file}")
+            os.remove(file)
         else:
             epochs.append(epoch)
     epochs.sort()

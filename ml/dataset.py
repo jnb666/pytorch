@@ -349,8 +349,9 @@ class LMDBDataset(Dataset):
         return data.to(self.device, self.dtype)
 
     def close(self) -> None:
-        self.env.close()
-        del self.env
+        if hasattr(self, "env"):
+            self.env.close()
+            del self.env
 
 
 class Loader:
@@ -403,6 +404,7 @@ class SingleProcessLoader(Loader):
 
     def start(self, ds: Dataset, max_items: int = 0) -> None:
         super().start(ds, max_items)
+        ds.open()
 
     def __iter__(self):
         self.batch = -1

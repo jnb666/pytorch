@@ -32,7 +32,7 @@ def subscribe(win: ml.MainWindow, db: ml.Database, server: str) -> None:
             elif (s.error != state.error or s.name != state.name or s.version != state.version or
                   s.models != state.models or s.checksum != state.checksum):
                 log.info(f"update config: {s.name} version={s.version} running={s.running}")
-                win.update_config(s.name, s.version, s.running)
+                win.update_config(s.name, s.version)
             elif (s.epoch != state.epoch or s.running != state.running or s.max_epoch != state.max_epoch
                   or (not s.running and s.epochs != state.epochs)):
                 log.info(f"update stats: {s.name} epoch={s.epoch}/{s.max_epoch} running={s.running}")
@@ -73,10 +73,11 @@ def main():
     win = ml.MainWindow(loader, client.send)
 
     subscribe(win, db, args.server)
+    log.info(f"load: {state.name} version={state.version}")
     if (args.force or not state.running) and state.name:
-        log.info(f"load: {state.name} version={state.version}")
         status, err = client.send("load", state.name, state.version)
-
+    else:
+        win.update_config(state.name, state.version)
     win.show()
     sys.exit(app.exec())
 

@@ -29,11 +29,14 @@ class Stats():
         self.current_epoch = 0
         self.xrange = []
         self.epoch = []
+        self.batch_loss = []
         self.train_loss = []
         self.test_loss = []
         self.test_accuracy = []
+        self.test_top5_accuracy = []
         self.valid_loss = []
         self.valid_accuracy = []
+        self.valid_top5_accuracy = []
         self.valid_accuracy_avg = []
         self.learning_rate = []
         self.predict = torch.tensor([], dtype=torch.int64)
@@ -45,7 +48,7 @@ class Stats():
         """Clear to default"""
         self.__dict__.update(Stats().__dict__)
 
-    def __str__(self):
+    def __str__(self) -> str:
         s = "Epoch {:3d}:  Train loss: {:.3f}  ".format(self.current_epoch, self.train_loss[-1])
         s += "Test loss: {:.3f} accuracy: {:.1%}".format(self.test_loss[-1], self.test_accuracy[-1])
         if len(self.valid_loss):
@@ -63,41 +66,63 @@ class Stats():
         else:
             return str(datetime.timedelta(seconds=round(total)))
 
-    def update(self, learning_rate: float, train_loss: float, test_loss: float, test_accuracy: float,
-               valid_loss: float | None = None, valid_accuracy: float | None = None):
-        """Add new record to stats history"""
+    def update_train(self, learning_rate: float, avg_loss: float, batch_loss: Tensor) -> None:
+        """Add new record with training set details to stats history"""
+        self.current_epoch += 1
         self.elapsed[-1] = time.time() - self.start[-1]
         self.epoch.append(self.current_epoch)
         self.learning_rate.append(learning_rate)
-        self.train_loss.append(train_loss)
-        self.test_loss.append(test_loss)
-        self.test_accuracy.append(test_accuracy)
-        if valid_loss is not None:
-            self.valid_loss.append(valid_loss)
-            self.valid_accuracy.append(valid_accuracy)
+        self.train_loss.append(avg_loss)
+        self.batch_loss.append(batch_loss)
 
-    def state_dict(self):
+    def update_test(self, loss: float, accuracy: float, top5_accuracy: float | None) -> None:
+        """Add new record with test set details to stats history"""
+        self.test_loss.append(loss)
+        self.test_accuracy.append(accuracy)
+        if top5_accuracy is not None:
+            self.test_top5_accuracy.append(top5_accuracy)
+
+    def update_valid(self, loss: float, accuracy: float, top5_accuracy: float | None) -> None:
+        """Add new record with validation set details to stats history"""
+        self.valid_loss.append(loss)
+        self.valid_accuracy.append(accuracy)
+        if top5_accuracy is not None:
+            self.valid_top5_accuracy.append(top5_accuracy)
+
+    def state_dict(self) -> dict[str, Any]:
         return self.__dict__
 
-    def load_state_dict(self, state):
+    def load_state_dict(self, state) -> None:
         self.__dict__.update(state)
         self.start.append(time.time())
         self.elapsed.append(0.0)
 
     def table_columns(self) -> list[str]:
+        flds = ["train loss", "test loss", "accuracy"]
+        if len(self.test_top5_accuracy):
+            flds.append("top5 accuracy")
         if len(self.valid_loss):
-            return ["train loss", "test loss", "accuracy", "valid loss", "accuracy "]
-        else:
-            return ["train loss", "test loss", "accuracy"]
+            flds.extend(["valid loss", "accuracy "])
+        if len(self.valid_top5_accuracy):
+            flds.append("top5 accuracy ")
+        return flds
 
     def table_data(self) -> list[tuple[float, ...]]:
         data: list[tuple[float, ...]] = []
         for i in range(len(self.epoch)):
-            if len(self.valid_loss) == 0:
-                data.append((self.train_loss[i], self.test_loss[i], 100*self.test_accuracy[i]))
-            else:
-                data.append((self.train_loss[i], self.test_loss[i], 100*self.test_accuracy[i],
-                             self.valid_loss[i], 100 * self.valid_accuracy[i]))
+            r = [self.train_loss[i], self.test_loss[i], 100*self.test_accuracy[i]]
+            j = i-self.current_epoch
+            if len(self.test_top5_accuracy) >= abs(j):
+                r.append(100*self.test_top5_accuracy[j])
+            elif len(self.test_top5_accuracy):
+                r.append(0)
+            if len(self.valid_loss):
+                r.extend([self.valid_loss[i], 100*self.valid_accuracy[i]])
+            if len(self.valid_top5_accuracy) >= abs(j):
+                r.append(100*self.valid_top5_accuracy[j])
+            elif len(self.valid_top5_accuracy):
+                r.append(0)
+            data.append(tuple(r))
         return data
 
 
@@ -182,6 +207,7 @@ class Trainer:
         else:
             self.loss_fn = loss_fn
         self.predict = torch.tensor([], dtype=torch.int64)
+        self.batch_loss = torch.tensor([], dtype=torch.float32)
         self.optimizer = cfg.optimizer(self.model)
         self.scheduler, self.metric = cfg.scheduler(self.optimizer)
         self.scaler = torch.cuda.amp.GradScaler(enabled=cfg.half)
@@ -240,73 +266,88 @@ class Trainer:
         return stats
 
     def train(self, train_data: Loader, transform: Transforms | None = None,
-              should_stop: Callable | None = None) -> float:
-        """Train one epoch against training dataset - returns training loss"""
+              should_stop: Callable | None = None) -> tuple[float, Tensor]:
+        """Train one epoch against training dataset - returns average training loss and loss per batch"""
         self.model.train()
         train_loss = 0.0
         batches = len(train_data)
-        for i, (data, targets, id) in enumerate(train_data):
+        if len(self.batch_loss) != batches:
+            self.batch_loss = torch.zeros(batches, dtype=torch.float32)
+        dtype = torch.float16 if self.cfg.half else torch.float32
+        iterator = iter(train_data)
+        for i in range(batches):
             with record_function(f"--training:get_data--"):
-                data = data.to(self.device, non_blocking=True)
+                data, targets, id = next(iterator)
+                if self.cfg.channels_last:
+                    data = data.to(self.device, dtype, memory_format=torch.channels_last, non_blocking=True)
+                else:
+                    data = data.to(self.device, dtype, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
                 if transform:
                     data = transform(data)
-                targets = targets.to(self.device, non_blocking=True)
             with record_function(f"--training:forward--"):
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                     pred = self.model(data)
                     loss = self.loss_fn(pred, targets)
-            with record_function(f"--training:backward--"):
-                self.scaler.scale(loss).backward()
                 del data, targets
                 train_data.release(id)
+            with record_function(f"--training:backward--"):
+                self.scaler.scale(loss).backward()
             with record_function(f"--training:update_loss--"):
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
                 loss_val = float(loss)
                 if not math.isnan(loss_val):
+                    self.batch_loss[i] = loss_val
                     train_loss += (loss_val - train_loss) / (i+1)
             sys.stdout.write(f"train batch {i+1} / {batches} : loss={train_loss:.3f}  \r")
             if should_stop and should_stop(train=True):
                 raise RunInterrupted()
-        return train_loss
+        return train_loss, self.batch_loss
 
-    def test(self, test_data: Loader, transform: Transforms | None = None,
-             should_stop: Callable | None = None) -> tuple[float, float]:
-        """Calculate loss and accuracy against the test set - returns test loss and accuracy"""
+    def test(self, test_data: Loader, transform: Transforms | None = None, calc_top5: bool = False,
+             should_stop: Callable | None = None) -> tuple[float, float, float | None]:
+        """Calculate loss and accuracy against the test set - returns test loss, accuracy and optionally top5 accuracy"""
         with record_function(f"--testing--"):
             self.model.eval()
             if len(self.predict) != test_data.nitems:
-                self.predict = torch.zeros((test_data.nitems), dtype=torch.int64)
+                self.predict = torch.zeros(test_data.nitems, dtype=torch.int64)
             test_loss = 0.0
-            total_correct = 0
+            accuracy = 0.0
+            top5_accuracy = 0.0 if calc_top5 else None
             samples = 0
-            iterator = iter(test_data)
             batches = len(test_data)
+            dtype = torch.float16 if self.cfg.half else torch.float32
             with torch.no_grad():
                 for i, (data, targets, id) in enumerate(test_data):
-                    data = data.to(self.device, non_blocking=True)
+                    data = data.to(self.device, dtype, non_blocking=True)
+                    targets = targets.to(self.device, non_blocking=True)
                     if transform:
                         data = transform(data)
-                    targets = targets.to(self.device, non_blocking=True)
+                    if self.cfg.channels_last:
+                        data = data.to(memory_format=torch.channels_last)
                     with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                         pred = self.model(data)
                         loss = self.loss_fn(pred, targets)
+                    nitems = len(targets)
                     outputs = pred.argmax(1)
                     correct = int((outputs == targets).type(torch.float).sum())
-                    nitems = len(targets)
+                    accuracy += ((correct/nitems) - accuracy) / (i+1)
+                    if top5_accuracy is not None:
+                        top5_correct = calc_topn_correct(pred, targets, k=5)
+                        top5_accuracy += ((top5_correct/nitems) - top5_accuracy) / (i+1)
                     del data, targets
                     test_data.release(id)
                     self.predict[samples: samples+nitems] = outputs
                     loss_val = float(loss)
                     if not math.isnan(loss_val):
                         test_loss += (loss_val - test_loss) / (i+1)
-                    total_correct += correct
                     samples += nitems
                     sys.stdout.write(f"test batch {i+1} / {batches} : loss={test_loss:.3f}    \r")
                     if should_stop and should_stop():
                         raise RunInterrupted()
-            return test_loss, total_correct/samples
+            return test_loss, accuracy, top5_accuracy
 
     def step(self, stats: Stats) -> None:
         """If scheduler is defined then call it's step function"""
@@ -327,6 +368,15 @@ class Trainer:
             return stop
 
 
+def calc_topn_correct(pred: Tensor, targets: Tensor, k: int) -> int:
+    """Get number of predictions where one of top k classes matches the target"""
+    _, y_pred = pred.topk(k=k, dim=1)
+    y_pred = y_pred.t()
+    target = targets.view(1, -1).expand_as(y_pred)
+    correct = (y_pred == target).reshape(-1).float()
+    return int(correct.sum(dim=0, keepdim=True))
+
+
 def calc_initial_stats(cfg: Config, model: nn.Module, test_data: Dataset, device: str = "cpu") -> Stats:
     """Do test run to calc stats for pre-trained model"""
     log.info(f"calc initial test stats for model  device={device}")
@@ -335,10 +385,15 @@ def calc_initial_stats(cfg: Config, model: nn.Module, test_data: Dataset, device
     is_cuda = device.startswith("cuda")
     test_loader = cfg.dataloader("test", pin_memory=is_cuda)
     test_loader.start(test_data)
-    test_loss, test_accuracy = trainer.test(test_loader)
-    log.info(f"Test loss: {test_loss:.3f} accuracy: {test_accuracy:.1%}")
+    calc_top5 = (len(test_data.classes) >= 100)
+    test_loss, test_accuracy, top5_accuracy = trainer.test(test_loader, test_data.transform, calc_top5=calc_top5)
+    if top5_accuracy is not None:
+        log.info(f"Test loss: {test_loss:.3f} accuracy: {test_accuracy:.1%} top5 accuracy: {top5_accuracy:.1%}")
+    else:
+        log.info(f"Test loss: {test_loss:.3f} accuracy: {test_accuracy:.1%}")
+    stats.update_train(0, 0, torch.tensor([]))
+    stats.update_test(test_loss, test_accuracy, top5_accuracy)
     stats.predict = trainer.predict
-    stats.update(0.0, 0.0, test_loss, test_accuracy)
     test_loader.shutdown()
     return stats
 

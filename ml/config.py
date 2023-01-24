@@ -103,6 +103,7 @@ class Config():
             raise InvalidConfigError(f"error decoding config: {err}")
         self.version = str(self.cfg.get("version", "1"))
         self.half = self.cfg.get("half", False)
+        self.channels_last = self.cfg.get("channels_last", False)
         self.dir: str = path.join(rundir, self.name, self.version)
         self.train = self.cfg.get("train", {})
         self.transform = self.cfg.get("transform", {})

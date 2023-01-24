@@ -266,17 +266,20 @@ def load_model(config: Config, input_shape: torch.Size, device: str = "cpu") -> 
     """
     cfg = config.cfg.get("model", {})
     if cfg.get("layers") is not None:
-        return Model(config, input_shape, device, init_weights=True)
+        model = Model(config, input_shape, device, init_weights=True)
     elif cfg.get("model") is not None:
         argv = cfg.get("model")
         if isinstance(argv, list) and len(argv) >= 1:
             typ, args, kwargs = splitargs(argv)
-            model = get_module("model", torchvision.models, typ, args, kwargs)
-            return model.to(device)
+            model = get_module("model", torchvision.models, typ, args, kwargs).to(device)
         else:
             raise InvalidConfigError("model definition should be a list")
     else:
         raise InvalidConfigError("no model definition found")
+    if config.channels_last:
+        log.info("using channels last format")
+        model = model.to(memory_format=torch.channels_last)  # type: ignore
+    return model
 
 
 def init_parameter(weight_info, weight_type, layer_type, param, config) -> None:
