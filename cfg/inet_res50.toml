@@ -1,5 +1,12 @@
 version = 1
 half = true
+channels_last = true
+
+[train]
+optimizer = ["SGD", {lr=0.25, momentum=0.9, nesterov=true, weight_decay=5e-5} ]
+scheduler = ["CosineAnnealingLR", {T_max=100} ]
+epochs = 100
+save_every = 5
 
 [train_data]
 dataset = "Imagenet"
@@ -22,7 +29,6 @@ transform = [
   ["CenterCrop", 224],
   ["Normalize", [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
 ]
-multi_process = true
 
 [model]
 block = [
@@ -88,8 +94,3 @@ layers = [
 Linear = ["normal", {std=0.01}]
 Conv2d = ["kaiming_normal", {mode="fan_out", nonlinearity="relu"}]
 
-[train]
-optimizer = ["SGD", {lr=0.1, momentum=0.9, nesterov=true, weight_decay=4e-5} ]
-scheduler = ["CosineAnnealingLR", {T_max=200} ]
-epochs = 200
-save_every = 5

@@ -23,7 +23,7 @@ from torchvision.transforms import functional as F  # type: ignore
 from .utils import (InvalidConfigError, RunInterrupted, format_args,
                     get_module, getargs, init_logger, set_seed)
 
-max_queue_size = 2
+max_queue_size = 4
 queue_poll_timeout = 0.1
 
 

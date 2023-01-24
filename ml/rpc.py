@@ -34,11 +34,11 @@ class Data:
     test_loader: Loader
     valid_loader: Loader | None
 
-    def start(self, max_items: int = 0):
+    def start(self, max_items: int = 0, max_test_items: int = 0):
         self.train_loader.start(self.train, max_items)
-        self.test_loader.start(self.test, max_items)
+        self.test_loader.start(self.test, max_test_items)
         if self.valid is not None and self.valid_loader is not None:
-            self.valid_loader.start(self.valid, max_items)
+            self.valid_loader.start(self.valid, max_test_items)
 
     def shutdown(self):
         self.train_loader.shutdown()
@@ -70,16 +70,15 @@ class BaseContext:
 
     def load_config(self, cfg: Config, verbose: bool = False) -> None:
         set_logdir(cfg.dir)
-        is_cuda = self.device.startswith("cuda")
         train_data = cfg.dataset(self.args.datadir, "train")
-        train_loader = cfg.dataloader("train", pin_memory=is_cuda)
+        train_loader = cfg.dataloader("train")
         log.info(f"== train data: ==\n{train_data}")
         test_data = cfg.dataset(self.args.datadir, "test")
-        test_loader = cfg.dataloader("test", pin_memory=is_cuda)
+        test_loader = cfg.dataloader("test")
         log.info(f"== test data: ==\n{test_data}")
         if cfg.data("valid"):
             valid_data = cfg.dataset(self.args.datadir, "valid")
-            valid_loader = cfg.dataloader("valid", pin_memory=is_cuda)
+            valid_loader = cfg.dataloader("valid")
             log.info(f"== valid data: ==\n{valid_data}")
         else:
             valid_data = None
@@ -98,7 +97,7 @@ class BaseContext:
         self.trainer = Trainer(self.cfg, self.data.model, device=self.device)
         self.stats = Stats()
         self.stats.xrange = [1, self.cfg.epochs]
-        self.data.start(self.args.max_items)
+        self.data.start(self.args.max_items, self.args.max_test_items)
         return True
 
     def resume(self, epoch: int) -> bool:
@@ -109,7 +108,7 @@ class BaseContext:
         self.stats = self.trainer.resume_from(epoch)
         if self.stats.current_epoch != epoch:
             raise RuntimeError(f"invalid checkpoint: epoch is {self.stats.current_epoch} - expected {epoch}")
-        self.data.start(self.args.max_items)
+        self.data.start(self.args.max_items, self.args.max_test_items)
         return True
 
     def do_epoch(self, should_stop: Callable | None = None) -> bool:

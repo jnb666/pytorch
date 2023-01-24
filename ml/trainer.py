@@ -268,43 +268,37 @@ class Trainer:
     def train(self, train_data: Loader, transform: Transforms | None = None,
               should_stop: Callable | None = None) -> tuple[float, Tensor]:
         """Train one epoch against training dataset - returns average training loss and loss per batch"""
-        self.model.train()
-        train_loss = 0.0
-        batches = len(train_data)
-        if len(self.batch_loss) != batches:
-            self.batch_loss = torch.zeros(batches, dtype=torch.float32)
-        dtype = torch.float16 if self.cfg.half else torch.float32
-        iterator = iter(train_data)
-        for i in range(batches):
-            with record_function(f"--training:get_data--"):
-                data, targets, id = next(iterator)
-                if self.cfg.channels_last:
-                    data = data.to(self.device, dtype, memory_format=torch.channels_last, non_blocking=True)
-                else:
-                    data = data.to(self.device, dtype, non_blocking=True)
+        with record_function(f"--training--"):
+            self.model.train()
+            train_loss = 0.0
+            batches = len(train_data)
+            if len(self.batch_loss) != batches:
+                self.batch_loss = torch.zeros(batches, dtype=torch.float32)
+            dtype = torch.float16 if self.cfg.half else torch.float32
+            for i, (data, targets, id) in enumerate(train_data):
+                data = data.to(self.device, dtype, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
                 if transform:
                     data = transform(data)
-            with record_function(f"--training:forward--"):
+                if self.cfg.channels_last:
+                    data = data.to(memory_format=torch.channels_last)
+                self.optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
                     pred = self.model(data)
                     loss = self.loss_fn(pred, targets)
                 del data, targets
                 train_data.release(id)
-            with record_function(f"--training:backward--"):
                 self.scaler.scale(loss).backward()
-            with record_function(f"--training:update_loss--"):
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                self.optimizer.zero_grad(set_to_none=True)
                 loss_val = float(loss)
                 if not math.isnan(loss_val):
                     self.batch_loss[i] = loss_val
                     train_loss += (loss_val - train_loss) / (i+1)
-            sys.stdout.write(f"train batch {i+1} / {batches} : loss={train_loss:.3f}  \r")
-            if should_stop and should_stop(train=True):
-                raise RunInterrupted()
-        return train_loss, self.batch_loss
+                sys.stdout.write(f"train batch {i+1} / {batches} : loss={train_loss:.3f}      \r")
+                if should_stop and should_stop(train=True):
+                    raise RunInterrupted()
+            return train_loss, self.batch_loss
 
     def test(self, test_data: Loader, transform: Transforms | None = None, calc_top5: bool = False,
              should_stop: Callable | None = None) -> tuple[float, float, float | None]:
@@ -344,7 +338,7 @@ class Trainer:
                     if not math.isnan(loss_val):
                         test_loss += (loss_val - test_loss) / (i+1)
                     samples += nitems
-                    sys.stdout.write(f"test batch {i+1} / {batches} : loss={test_loss:.3f}    \r")
+                    sys.stdout.write(f"test batch {i+1} / {batches} : loss={test_loss:.3f}      \r")
                     if should_stop and should_stop():
                         raise RunInterrupted()
             return test_loss, accuracy, top5_accuracy
