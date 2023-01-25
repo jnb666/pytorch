@@ -9,12 +9,13 @@ from typing import Callable
 import ml
 import redis
 import zmq
+from ml.gui import MainWindow, init_gui
 from PySide6.QtCore import QTimer
 
 timeout = 20
 
 
-def subscribe(win: ml.MainWindow, db: ml.Database, server: str) -> None:
+def subscribe(win: MainWindow, db: ml.Database, server: str) -> None:
     r = ml.Database(server, notify=True)
     pubsub = r.db.pubsub()
     log.info("subscribe for redis notifications")
@@ -69,8 +70,8 @@ def main():
         device=device
     )
 
-    app = ml.init_gui()
-    win = ml.MainWindow(loader, client.send)
+    app = init_gui()
+    win = MainWindow(loader, client.send)
 
     subscribe(win, db, args.server)
     log.info(f"load: {state.name} version={state.version}")

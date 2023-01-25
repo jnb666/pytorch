@@ -84,8 +84,8 @@ class FileLoader(Loader):
         return cfg.text
 
     def load_config(self, name: str, version: str = "") -> tuple[Config, nn.Module, Dataset, Transforms | None]:
-        log.info(f"load_config: {name}")
         cfg = load_config_file(name, version, self.rundir, self.cfgdir)
+        log.info(f"load_config: {name} version={cfg.version}")
         self.cfg, self.model, self.data, transform = self._load_config(cfg)
         log.info(f"== test data: ==\n{self.data}")
         log.debug(str(self.model))

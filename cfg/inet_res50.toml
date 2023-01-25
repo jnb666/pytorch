@@ -3,7 +3,7 @@ half = true
 channels_last = true
 
 [train]
-optimizer = ["SGD", {lr=0.25, momentum=0.9, nesterov=true, weight_decay=5e-5} ]
+optimizer = ["SGD", {lr=0.1, momentum=0.9, nesterov=true, weight_decay=4e-5} ]
 scheduler = ["CosineAnnealingLR", {T_max=100} ]
 epochs = 100
 save_every = 5

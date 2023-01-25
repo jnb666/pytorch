@@ -9,7 +9,6 @@ from .config import Config, Index
 from .database import Database
 from .dataset import (ImagenetDataset, LMDBDataset, MultiProcessLoader,
                       SingleProcessLoader, TensorDataset, Transforms)
-from .gui import MainWindow, init_gui
 from .loader import DBLoader, FileLoader
 from .model import Model
 from .rpc import Client, CmdContext, Server, State

@@ -6,6 +6,7 @@ import sys
 from os import path
 
 import ml
+from ml.gui import MainWindow, init_gui
 
 
 def main():
@@ -30,9 +31,9 @@ def main():
     )
     name = path.basename(args.config).removesuffix(".toml")
 
-    app = ml.init_gui()
-    win = ml.MainWindow(loader)
-    win.update_config(name, args.version, running=False)
+    app = init_gui()
+    win = MainWindow(loader)
+    win.update_config(name, args.version)
     win.update_stats()
     win.show()
     sys.exit(app.exec())
