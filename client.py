@@ -58,6 +58,8 @@ def main():
     device = ml.get_device("cpu")
     db = ml.Database(args.server)
     state = db.get_state()
+    if state.name == "":
+        state.name = "mnist_mlp"
     if state.version == "":
         state.version = "1"
     client = ml.Client(args.server)
@@ -75,7 +77,7 @@ def main():
 
     subscribe(win, db, args.server)
     log.info(f"load: {state.name} version={state.version}")
-    if (args.force or not state.running) and state.name:
+    if args.force or not state.running:
         status, err = client.send("load", state.name, state.version)
     else:
         win.update_config(state.name, state.version)
