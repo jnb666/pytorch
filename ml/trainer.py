@@ -343,6 +343,83 @@ class Trainer:
                         raise RunInterrupted()
             return test_loss, accuracy, top5_accuracy
 
+    def capture_graph(self, train_data: Loader, transform: Transforms | None) -> None:
+        """Capture model train step as graph for later execution"""
+        log.info("capturing graph")
+        dtype = torch.float16 if self.cfg.half else torch.float32
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        iterator = iter(train_data)
+        with torch.cuda.stream(s):
+            for i in range(3):
+                data, targets, id = next(iterator)
+                data = data.to(self.device, dtype, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
+                self.optimizer.zero_grad(set_to_none=True)
+                if transform:
+                    data = transform(data)
+                if self.cfg.channels_last:
+                    data = data.to(memory_format=torch.channels_last)
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
+                    pred = self.model(data)
+                    loss = self.loss_fn(pred, targets)
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                train_data.release(id)
+        torch.cuda.current_stream().wait_stream(s)
+
+        data, targets, id = next(iterator)
+        data = data.to(self.device, dtype, non_blocking=True)
+        targets = targets.to(self.device, non_blocking=True)
+        if transform:
+            data = transform(data)
+        if self.cfg.channels_last:
+            data = data.to(memory_format=torch.channels_last)
+        self.static_input = data
+        self.static_target = targets
+        self.graph = torch.cuda.CUDAGraph()
+        self.optimizer.zero_grad(set_to_none=True)
+        with torch.cuda.graph(self.graph):
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.cfg.half):
+                self.static_pred = self.model(self.static_input)
+                self.static_loss = self.loss_fn(self.static_pred, self.static_target)
+            self.scaler.scale(self.static_loss).backward()
+        train_data.release(id)
+
+    def train_capture(self, train_data: Loader, transform: Transforms | None,
+                      should_stop: Callable | None = None) -> tuple[float, Tensor]:
+        """Train one epoch against training dataset - returns average training loss and loss per batch - with capture enabled"""
+        with record_function(f"--training--"):
+            self.model.train()
+            train_loss = 0.0
+            batches = len(train_data)
+            if len(self.batch_loss) != batches:
+                self.batch_loss = torch.zeros(batches, dtype=torch.float32)
+            dtype = torch.float16 if self.cfg.half else torch.float32
+            for i, (data, targets, id) in enumerate(train_data):
+                data = data.to(self.device, dtype, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
+                if transform:
+                    data = transform(data)
+                if self.cfg.channels_last:
+                    data = data.to(memory_format=torch.channels_last)
+                self.static_input.copy_(data)
+                self.static_target.copy_(targets)
+                self.graph.replay()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                loss_val = float(self.static_loss)
+                del data, targets
+                train_data.release(id)
+                if not math.isnan(loss_val):
+                    self.batch_loss[i] = loss_val
+                    train_loss += (loss_val - train_loss) / (i+1)
+                sys.stdout.write(f"train batch {i+1} / {batches} : loss={train_loss:.3f}      \r")
+                if should_stop and should_stop(train=True):
+                    raise RunInterrupted()
+            return train_loss, self.batch_loss
+
     def step(self, stats: Stats) -> None:
         """If scheduler is defined then call it's step function"""
         if self.scheduler:

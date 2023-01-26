@@ -88,27 +88,33 @@ class BaseContext:
             log.info(str(model))
         self.data = Data(cfg, model, train_data, test_data, valid_data, train_loader, test_loader, valid_loader)
 
+    def get_trainer(self, data: Data) -> Trainer:
+        trainer = Trainer(self.cfg, data.model, device=self.device)
+        if self.args.capture:
+            trainer.capture_graph(data.train_loader, data.train.transform)
+        return trainer
+
     def restart(self, clear_files: bool = False) -> bool:
         if not self.data or not isinstance(self.data.model, Model):
             return False
         self.cfg.save(clear=clear_files)
         set_seed(self.cfg.seed)
         self.data.model.init_weights()
-        self.trainer = Trainer(self.cfg, self.data.model, device=self.device)
+        self.data.start(self.args.max_items, self.args.max_test_items)
+        self.trainer = self.get_trainer(self.data)
         self.stats = Stats()
         self.stats.xrange = [1, self.cfg.epochs]
-        self.data.start(self.args.max_items, self.args.max_test_items)
         return True
 
     def resume(self, epoch: int) -> bool:
         if not self.data or not isinstance(self.data.model, Model):
             return False
         self.cfg.save()
-        self.trainer = Trainer(self.cfg, self.data.model, device=self.device)
+        self.data.start(self.args.max_items, self.args.max_test_items)
+        self.trainer = self.get_trainer(self.data)
         self.stats = self.trainer.resume_from(epoch)
         if self.stats.current_epoch != epoch:
             raise RuntimeError(f"invalid checkpoint: epoch is {self.stats.current_epoch} - expected {epoch}")
-        self.data.start(self.args.max_items, self.args.max_test_items)
         return True
 
     def do_epoch(self, should_stop: Callable | None = None) -> bool:
@@ -116,9 +122,14 @@ class BaseContext:
         if not self.trainer or not self.data:
             return True
         try:
-            train_loss, batch_loss = self.trainer.train(
-                self.data.train_loader, self.data.train.transform, should_stop=should_stop
-            )
+            if self.args.capture:
+                train_loss, batch_loss = self.trainer.train_capture(
+                    self.data.train_loader,  self.data.train.transform, should_stop=should_stop
+                )
+            else:
+                train_loss, batch_loss = self.trainer.train(
+                    self.data.train_loader, self.data.train.transform, should_stop=should_stop
+                )
             calc_top5 = (len(self.data.test.classes) >= 100)
             if self.data.valid is not None and self.data.valid_loader is not None:
                 valid_loss, valid_accuracy, valid_top5_accuracy = self.trainer.test(

@@ -88,6 +88,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=0, help="number of epochs to train")
     parser.add_argument("--resume", type=int, default=0, help="resume training at given epoch")
     parser.add_argument("--deterministic", action="store_true", default=False, help="deterministic runs with CUDA (slower)")
+    parser.add_argument("--capture", action="store_true", default=False, help="capture model execution as a CUDA graph")
     parser.add_argument("--clear", action="store_true", default=False, help="clear data from prior runs")
     parser.add_argument("--debug", action="store_true", default=False, help="debug printing")
     parser.add_argument("--cpuprofile", action="store_true", default=False, help="generate CPU profile")

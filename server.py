@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--max_items", type=int, default=0, help="limit maximum number of items per epoch")
     parser.add_argument("--max_test_items", type=int, default=0, help="limit maximum number of test items per epoch")
     parser.add_argument("--deterministic", action="store_true", default=False, help="deterministic runs with CUDA (slower)")
+    parser.add_argument("--capture", action="store_true", default=False, help="capture model execution as a CUDA graph")
     parser.add_argument("--debug", action="store_true", default=False, help="debug printing")
     args = parser.parse_args()
 

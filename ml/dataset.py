@@ -334,18 +334,18 @@ class LMDBDataset(Dataset):
     def open(self) -> None:
         if hasattr(self, "env"):
             return
-        self.env = lmdb.open(self.dir, readonly=True)
+        self.env = lmdb.open(self.dir, readonly=True, lock=False)
 
     def get_data(self, ix: int) -> Tensor:
         with self.env.begin() as txn:
             buf = txn.get(f"{ix:08}".encode("ascii"))
-        if buf is None:
-            raise FileNotFoundError(f"LMDBDataset: image {ix} not found")
-        img = np.frombuffer(buf, dtype=np.uint8).reshape(self.size)
-        if self.dtype == torch.float32:
-            data = torch.from_numpy(img.astype(np.float32) / 255.0)
-        else:
-            data = torch.from_numpy(img.copy())
+            if buf is None:
+                raise FileNotFoundError(f"LMDBDataset: image {ix} not found")
+            img = np.frombuffer(buf, dtype=np.uint8).reshape(self.size)
+            if self.dtype == torch.float32:
+                data = torch.from_numpy(img.astype(np.float32) / 255.0)
+            else:
+                data = torch.from_numpy(img.copy())
         return data.to(self.device, self.dtype)
 
     def close(self) -> None:
